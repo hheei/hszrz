@@ -1,0 +1,24 @@
+[package]
+name = "hszrz"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight Tailscale-aware terminal file transfer with native OS pickers and zstd packaging"
+license = "MIT"
+repository = "https://github.com/hheei/hszrz"
+
+[dependencies]
+crossterm = "0.28"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "hszrz"
+path = "src/main.rs"
+
+[[bin]]
+name = "hsz"
+path = "src/bin/hsz.rs"
+
+[[bin]]
+name = "hrz"
+path = "src/bin/hrz.rs"

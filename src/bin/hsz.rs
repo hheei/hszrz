@@ -1,0 +1,151 @@
+use hszrz::pick_host_interactive;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::{exit, Command};
+
+pub fn run_hsz(args: &[String]) {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut target_host: Option<String> = None;
+    let mut dest_dir = "~/Downloads/".to_string();
+    let mut auto_open = false;
+    let mut auto_reveal = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-t" | "--to" | "--host" => {
+                if i + 1 < args.len() {
+                    target_host = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "-d" | "--dest" => {
+                if i + 1 < args.len() {
+                    dest_dir = args[i + 1].clone();
+                    i += 1;
+                }
+            }
+            "-o" | "--open" => auto_open = true,
+            "-r" | "--reveal" => auto_reveal = true,
+            "-h" | "--help" => {
+                println!("hsz — Send files/directories to target Tailscale node");
+                println!("Usage: hsz [options] <files/dirs...>");
+                println!("Options:");
+                println!("  -t, --to <host>   Target host (skips selection menu)");
+                println!("  -d, --dest <dir>  Destination folder (default: ~/Downloads/)");
+                println!("  -o, --open        Open file(s) on target after transfer");
+                println!("  -r, --reveal      Reveal file(s) in target file manager");
+                return;
+            }
+            arg if !arg.starts_with('-') => {
+                paths.push(PathBuf::from(arg));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if paths.is_empty() {
+        eprintln!("Usage: hsz <files/dirs...>");
+        exit(1);
+    }
+
+    for p in &paths {
+        if !p.exists() {
+            eprintln!("Error: '{}' not found.", p.display());
+            exit(1);
+        }
+    }
+
+    let host = match target_host {
+        Some(h) => h,
+        None => match pick_host_interactive("Select Destination Machine") {
+            Some(p) => p.hostname,
+            None => exit(0),
+        },
+    };
+
+    let mut transfer_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut temp_files: Vec<PathBuf> = Vec::new();
+
+    for p in paths {
+        let abs = p.canonicalize().unwrap_or(p.clone());
+        let fname = abs
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| "transfer".to_string());
+
+        if abs.is_dir() {
+            println!("📦 Packaging directory '{}' with zstd...", fname);
+            let tmp_archive = env::temp_dir().join(format!("{}.tar.zst", fname));
+            let parent = abs.parent().unwrap_or(Path::new("."));
+
+            let status = Command::new("tar")
+                .arg("-C")
+                .arg(parent)
+                .arg("--zstd")
+                .arg("-cf")
+                .arg(&tmp_archive)
+                .arg(&fname)
+                .status();
+
+            if status.map(|s| s.success()).unwrap_or(false) {
+                temp_files.push(tmp_archive.clone());
+                transfer_files.push((tmp_archive, format!("{}.tar.zst", fname)));
+            } else {
+                eprintln!("Failed to compress directory '{}'", fname);
+                exit(1);
+            }
+        } else {
+            transfer_files.push((abs, fname));
+        }
+    }
+
+    println!("🚀 Sending to {}:{}", host, dest_dir);
+    let mut cmd = Command::new("rsync");
+    cmd.arg("-ahP");
+    for (src, _) in &transfer_files {
+        cmd.arg(src);
+    }
+    cmd.arg(format!("{}:{}", host, dest_dir));
+
+    let run_res = cmd.status();
+    let success = match run_res {
+        Ok(s) if s.success() => true,
+        _ => {
+            // Fallback to scp
+            let mut scp_cmd = Command::new("scp");
+            scp_cmd.arg("-p");
+            for (src, _) in &transfer_files {
+                scp_cmd.arg(src);
+            }
+            scp_cmd.arg(format!("{}:{}", host, dest_dir));
+            scp_cmd.status().map(|s| s.success()).unwrap_or(false)
+        }
+    };
+
+    // Clean temp
+    for tmp in temp_files {
+        let _ = std::fs::remove_file(tmp);
+    }
+
+    if success {
+        println!("✅ Transfer complete!");
+        if auto_open || auto_reveal {
+            for (_, remote_name) in transfer_files {
+                let full = format!("{}/{}", dest_dir.trim_end_matches('/'), remote_name);
+                let flag = if auto_reveal { "-R" } else { "" };
+                let remote_script = format!("open {} '{}' 2>/dev/null || xdg-open '{}' 2>/dev/null", flag, full, full);
+                let _ = Command::new("ssh").arg(&host).arg(remote_script).status();
+            }
+        }
+    } else {
+        eprintln!("❌ Transfer failed.");
+        exit(1);
+    }
+}
+
+fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+    run_hsz(&args);
+}
