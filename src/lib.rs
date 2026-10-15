@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{self, stdout};
+use std::io::stdout;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -123,7 +123,6 @@ pub fn is_fuzzy_match(query: &str, target: &str) -> bool {
     true
 }
 
-// Helper to center a rect
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -147,11 +146,10 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
     let all_peers = get_tailscale_peers();
     if all_peers.is_empty() {
-        eprintln!("❌ No reachable online Tailscale peers found.");
+        eprintln!("Error: No reachable online Tailscale peers found.");
         return None;
     }
 
-    // Setup terminal
     let _ = enable_raw_mode();
     let mut stdout = stdout();
     let _ = crossterm::execute!(stdout, EnterAlternateScreen);
@@ -169,7 +167,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
     let mut chosen_peer: Option<Peer> = None;
 
     loop {
-        // Filter candidates based on search buffer
         let filtered: Vec<&Peer> = all_peers
             .iter()
             .filter(|p| {
@@ -204,10 +201,11 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let area = centered_rect(percent_x, percent_y, size);
             f.render_widget(Clear, area);
 
-            let title = format!(" 📡 {} ", action_label);
+            // Left-aligned title with rounded border
+            let title = format!(" [ {} ] ", action_label);
             let block = Block::default()
                 .title(title)
-                .title_alignment(Alignment::Center)
+                .title_alignment(Alignment::Left)
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Cyan));
@@ -218,29 +216,29 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),              // Search prompt
-                    Constraint::Min(2),                 // Grid
-                    Constraint::Length(1),              // Footer
+                    Constraint::Length(1),
+                    Constraint::Min(2),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
 
-            // Search bar
+            // Left-aligned search bar
             let search_text = if search_buf.is_empty() {
-                "  🔍 Type to filter, numbers to jump...".to_string()
+                "  Filter: (type to search, 1-9 to jump)".to_string()
             } else {
-                format!("  🔍 Search: {}█", search_buf)
+                format!("  Filter: {}_", search_buf)
             };
             let search_style = if search_buf.is_empty() {
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             };
-            f.render_widget(Paragraph::new(search_text).style(search_style), chunks[0]);
+            f.render_widget(Paragraph::new(search_text).style(search_style).alignment(Alignment::Left), chunks[0]);
 
             // Grid items
             if num_items == 0 {
-                let empty_msg = Paragraph::new("No matching online machines.")
-                    .alignment(Alignment::Center)
+                let empty_msg = Paragraph::new("  No matching machines.")
+                    .alignment(Alignment::Left)
                     .style(Style::default().fg(Color::Red));
                 f.render_widget(empty_msg, chunks[1]);
             } else {
@@ -261,10 +259,9 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         let idx = r + c * num_rows;
                         if idx < num_items {
                             let p = filtered[idx];
-                            // Find absolute index in all_peers for display
                             let abs_idx = all_peers.iter().position(|x| x.hostname == p.hostname).unwrap_or(idx) + 1;
                             let is_selected = idx == selected_idx;
-                            let prefix = if is_selected { "❯ " } else { "  " };
+                            let prefix = if is_selected { "> " } else { "  " };
                             let label = format!("{}[{:>width$}] {} ({})", prefix, abs_idx, p.hostname, p.os, width = pad_width);
 
                             let style = if is_selected {
@@ -278,13 +275,13 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                             col_lines.push(ratatui::text::Line::styled(label, style));
                         }
                     }
-                    f.render_widget(Paragraph::new(col_lines), grid_chunks[c]);
+                    f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
                 }
             }
 
-            // Footer
-            let footer = Paragraph::new(" [↑↓←→] Move  [Enter] Select  [Esc/q] Quit")
-                .alignment(Alignment::Center)
+            // Left-aligned footer
+            let footer = Paragraph::new("  [Arrows] Move  [Enter] Select  [Esc/q] Quit")
+                .alignment(Alignment::Left)
                 .style(Style::default().fg(Color::DarkGray));
             f.render_widget(footer, chunks[2]);
         });
@@ -293,7 +290,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             break;
         }
 
-        // Handle keys
         if let Ok(Event::Key(key)) = event::read() {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => {
@@ -356,7 +352,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
         }
     }
 
-    // Clean terminal
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
     let _ = terminal.show_cursor();

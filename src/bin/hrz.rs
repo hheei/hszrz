@@ -40,7 +40,7 @@ pub fn run_hrz(args: &[String]) {
         },
     };
 
-    println!("⏳ Waiting for file selection on {} ({})...", peer.hostname, peer.os);
+    println!("Waiting for file selection on {} ({})...", peer.hostname, peer.os);
     let os_low = peer.os.to_lowercase();
     let host_low = peer.hostname.to_lowercase();
 
@@ -71,7 +71,7 @@ pub fn run_hrz(args: &[String]) {
         .map(|d| d.join(&base_name))
         .unwrap_or_else(|_| Path::new(&base_name).to_path_buf());
 
-    println!("🚀 Downloading '{}' from {} -> {}", base_name, peer.hostname, dest.display());
+    println!("Downloading '{}' from {} -> {}", base_name, peer.hostname, dest.display());
 
     let rsync_status = Command::new("rsync")
         .arg("-ahP")
@@ -93,9 +93,9 @@ pub fn run_hrz(args: &[String]) {
     };
 
     if success {
-        println!("✅ Received '{}'!", base_name);
+        println!("Received '{}'!", base_name);
     } else {
-        eprintln!("❌ Download failed.");
+        eprintln!("Error: Download failed.");
         exit(1);
     }
 }
@@ -148,7 +148,7 @@ fn ask_file_linux(host: &str) -> Option<String> {
     let output = Command::new("ssh").arg(host).arg(check).output().ok()?;
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if out == "NO_DISPLAY" {
-        eprintln!("❌ Host '{}' (Linux) is a headless server without a desktop GUI environment.", host);
+        eprintln!("Error: Host '{}' (Linux) is a headless server without a desktop GUI environment.", host);
         None
     } else if out == "NO_PICKER" {
         eprintln!("❌ Host '{}' (Linux) has a desktop session, but no GUI picker (zenity/kdialog) is installed.", host);

@@ -40,9 +40,9 @@ fn main() {
         "recv" | "r" | "rz" => hrz::run_hrz(&rest),
         "hosts" | "list" | "ls" => {
             let peers = hszrz::get_tailscale_peers();
-            println!("📡 Online Tailscale Peers ({} total):", peers.len());
+            println!("Online Tailscale Peers ({} total):", peers.len());
             for p in peers {
-                println!("  • {:<16} ({})", p.hostname, p.os);
+                println!("  - {:<16} ({})", p.hostname, p.os);
             }
         }
         "help" | "-h" | "--help" => print_help(),

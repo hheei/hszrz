@@ -76,7 +76,7 @@ pub fn run_hsz(args: &[String]) {
             .unwrap_or_else(|| "transfer".to_string());
 
         if abs.is_dir() {
-            println!("📦 Packaging directory '{}' with zstd...", fname);
+            println!("Packaging directory '{}' with zstd...", fname);
             let tmp_archive = env::temp_dir().join(format!("{}.tar.zst", fname));
             let parent = abs.parent().unwrap_or(Path::new("."));
 
@@ -101,7 +101,7 @@ pub fn run_hsz(args: &[String]) {
         }
     }
 
-    println!("🚀 Sending to {}:{}", host, dest_dir);
+    println!("Sending to {}:{}", host, dest_dir);
     let mut cmd = Command::new("rsync");
     cmd.arg("-ahP");
     for (src, _) in &transfer_files {
@@ -130,7 +130,7 @@ pub fn run_hsz(args: &[String]) {
     }
 
     if success {
-        println!("✅ Transfer complete!");
+        println!("Done: Transfer complete.");
         if auto_open || auto_reveal {
             for (_, remote_name) in transfer_files {
                 let full = format!("{}/{}", dest_dir.trim_end_matches('/'), remote_name);
@@ -140,7 +140,7 @@ pub fn run_hsz(args: &[String]) {
             }
         }
     } else {
-        eprintln!("❌ Transfer failed.");
+        eprintln!("Error: Transfer failed.");
         exit(1);
     }
 }
