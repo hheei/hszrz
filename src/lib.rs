@@ -5,9 +5,10 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::stdout;
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,41 @@ pub struct Peer {
     pub os: String,
     pub online: bool,
     pub dns: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct Config {
+    pub order: Option<Vec<String>>,
+}
+
+pub fn config_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config/hrzsz.toml")
+    } else {
+        PathBuf::from(".hrzsz.toml")
+    }
+}
+
+pub fn load_config() -> Config {
+    let p = config_path();
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        Config::default()
+    }
+}
+
+pub fn save_config_order(order: &[String]) {
+    let p = config_path();
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let cfg = Config {
+        order: Some(order.to_vec()),
+    };
+    if let Ok(s) = toml::to_string_pretty(&cfg) {
+        let _ = std::fs::write(p, s);
+    }
 }
 
 #[derive(Deserialize)]
@@ -104,7 +140,23 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
         }
     }
 
-    peers.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+    let cfg = load_config();
+    if let Some(order) = cfg.order {
+        peers.sort_by(|a, b| {
+            let pos_a = order.iter().position(|h| h.eq_ignore_ascii_case(&a.hostname));
+            let pos_b = order.iter().position(|h| h.eq_ignore_ascii_case(&b.hostname));
+
+            match (pos_a, pos_b) {
+                (Some(ia), Some(ib)) => ia.cmp(&ib),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
+            }
+        });
+    } else {
+        peers.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+    }
+
     peers
 }
 
@@ -129,7 +181,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
-    let peers = get_tailscale_peers();
+    let mut peers = get_tailscale_peers();
     if peers.is_empty() {
         eprintln!("Error: No reachable online Tailscale peers found.");
         return None;
@@ -166,7 +218,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let area = centered_rect(percent_x, percent_y, size);
             f.render_widget(Clear, area);
 
-            // Left-aligned title without brackets
             let title = format!(" {} ", action_label);
             let block = Block::default()
                 .title(title)
@@ -181,12 +232,11 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(num_rows as u16),   // Grid
-                    Constraint::Length(1),              // Footer
+                    Constraint::Min(num_rows as u16),
+                    Constraint::Length(1),
                 ])
                 .split(inner);
 
-            // Grid items
             let grid_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints(if num_cols == 2 {
@@ -206,7 +256,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         let p = &peers[idx];
                         let is_selected = idx == selected_idx;
                         let prefix = if is_selected { "> " } else { "  " };
-                        // Numbers without brackets: " 1. name (os)"
                         let label = format!("{}{:>width$}. {} ({})", prefix, idx + 1, p.hostname, p.os, width = pad_width);
 
                         let style = if is_selected {
@@ -223,8 +272,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
             }
 
-            // Minimalist footer connected by middle dots
-            let footer = Paragraph::new("  arrows navigate ‧ enter select ‧ esc quit")
+            let footer = Paragraph::new("  arrows navigate ‧ [ ] reorder ‧ enter select ‧ esc quit")
                 .alignment(Alignment::Left)
                 .style(Style::default().fg(Color::DarkGray));
             f.render_widget(footer, chunks[1]);
@@ -268,6 +316,22 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 KeyCode::Right => {
                     if num_cols == 2 && selected_idx + num_rows < num_items {
                         selected_idx += num_rows;
+                    }
+                }
+                KeyCode::Char('[') => {
+                    if selected_idx > 0 {
+                        peers.swap(selected_idx, selected_idx - 1);
+                        selected_idx -= 1;
+                        let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
+                        save_config_order(&order);
+                    }
+                }
+                KeyCode::Char(']') => {
+                    if selected_idx + 1 < num_items {
+                        peers.swap(selected_idx, selected_idx + 1);
+                        selected_idx += 1;
+                        let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
+                        save_config_order(&order);
                     }
                 }
                 KeyCode::Char(c) if c.is_digit(10) => {
