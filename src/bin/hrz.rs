@@ -157,7 +157,7 @@ fn ask_file_windows(host: &str, port: Option<&str>) -> Option<String> {
     if let Some(p) = port {
         ssh.args(["-p", p, "-o", "StrictHostKeyChecking=no"]);
     }
-    ssh.arg(host).arg(format!("powershell -Command "{}"", ps));
+    ssh.arg(host).arg(format!("powershell -Command \"{}\"", ps));
     let output = ssh.output().ok()?;
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if out.is_empty() || out.contains("CANCELED") {

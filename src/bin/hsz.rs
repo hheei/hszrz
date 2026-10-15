@@ -1,4 +1,4 @@
-use hszrz::{pick_host_interactive, Peer};
+use hszrz::pick_host_interactive;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
