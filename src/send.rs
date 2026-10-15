@@ -1,9 +1,18 @@
-use hszrz::pick_host_interactive;
+use hszrz::{pick_host_interactive, resolve_target, ssh_cmd};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
-pub fn run_hsz(args: &[String]) {
+struct TempCleanup(Vec<PathBuf>);
+impl Drop for TempCleanup {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+pub fn run(args: &[String]) {
     let mut paths: Vec<PathBuf> = Vec::new();
     let mut target_host: Option<String> = None;
     let mut dest_dir = "~/Downloads/".to_string();
@@ -28,18 +37,10 @@ pub fn run_hsz(args: &[String]) {
             "-o" | "--open" => auto_open = true,
             "-r" | "--reveal" => auto_reveal = true,
             "-h" | "--help" => {
-                println!("hsz — Send files/directories to target machine");
-                println!("Usage: hsz [options] <files/dirs...>");
-                println!("Options:");
-                println!("  -t, --to <host>   Target host (skips selection menu)");
-                println!("  -d, --dest <dir>  Destination folder (default: ~/Downloads/)");
-                println!("  -o, --open        Open file(s) on target after transfer");
-                println!("  -r, --reveal      Reveal file(s) in target file manager");
+                println!("hsz — Send files/directories to target machine\n\nUsage: hsz [options] <files/dirs...>\n\nOptions:\n  -t, --to <host>   Target host (skips selection menu)\n  -d, --dest <dir>  Destination folder (default: ~/Downloads/)\n  -o, --open        Open file(s) on target after transfer\n  -r, --reveal      Reveal file(s) in target file manager");
                 return;
             }
-            arg if !arg.starts_with('-') => {
-                paths.push(PathBuf::from(arg));
-            }
+            arg if !arg.starts_with('-') => paths.push(PathBuf::from(arg)),
             _ => {}
         }
         i += 1;
@@ -47,7 +48,6 @@ pub fn run_hsz(args: &[String]) {
 
     if paths.is_empty() {
         eprintln!("Error: No files or directories specified.");
-        eprintln!("Usage: hsz [options] <files/dirs...>");
         exit(1);
     }
 
@@ -58,7 +58,7 @@ pub fn run_hsz(args: &[String]) {
         }
     }
 
-    let (host, reverse_port) = match target_host {
+    let (raw_host, reverse_port) = match target_host {
         Some(h) => (h, None),
         None => match pick_host_interactive("Select Destination Machine") {
             Some(p) => (p.hostname, p.reverse_port),
@@ -66,19 +66,18 @@ pub fn run_hsz(args: &[String]) {
         },
     };
 
-    let is_client = reverse_port.is_some() || host.starts_with(':');
-    let ssh_host = if is_client { "localhost".to_string() } else { host.clone() };
-    let ssh_port_opt = reverse_port.map(|p| p.to_string());
+    let (ssh_host, target_port) = if let Some(p) = reverse_port {
+        ("localhost".to_string(), Some(p))
+    } else {
+        resolve_target(&raw_host)
+    };
 
     let mut transfer_files: Vec<(PathBuf, String)> = Vec::new();
-    let mut temp_files: Vec<PathBuf> = Vec::new();
+    let mut temp_guard = TempCleanup(Vec::new());
 
     for p in paths {
         let abs = p.canonicalize().unwrap_or(p.clone());
-        let fname = abs
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_else(|| "transfer".to_string());
+        let fname = abs.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "transfer".to_string());
 
         if abs.is_dir() {
             println!("Packaging directory '{}' with zstd...", fname);
@@ -95,7 +94,7 @@ pub fn run_hsz(args: &[String]) {
                 .status();
 
             if status.map(|s| s.success()).unwrap_or(false) {
-                temp_files.push(tmp_archive.clone());
+                temp_guard.0.push(tmp_archive.clone());
                 transfer_files.push((tmp_archive, format!("{}.tar.zst", fname)));
             } else {
                 eprintln!("Failed to compress directory '{}'", fname);
@@ -106,38 +105,32 @@ pub fn run_hsz(args: &[String]) {
         }
     }
 
-    println!("Sending to {}:{}", host, dest_dir);
-    let mut cmd = Command::new("rsync");
-    cmd.arg("-ahP");
-    if let Some(ref port) = ssh_port_opt {
-        cmd.arg("-e").arg(format!("ssh -p {} -o StrictHostKeyChecking=no", port));
+    println!("Sending to {}:{}", raw_host, dest_dir);
+    let mut rsync = Command::new("rsync");
+    rsync.arg("-ahP");
+    if let Some(p) = target_port {
+        rsync.arg("-e").arg(format!("ssh -p {} -o StrictHostKeyChecking=no", p));
     }
     for (src, _) in &transfer_files {
-        cmd.arg(src);
+        rsync.arg(src);
     }
-    cmd.arg(format!("{}:{}", ssh_host, dest_dir));
+    rsync.arg(format!("{}:{}", ssh_host, dest_dir));
 
-    let run_res = cmd.status();
-    let success = match run_res {
+    let success = match rsync.status() {
         Ok(s) if s.success() => true,
         _ => {
-            let mut scp_cmd = Command::new("scp");
-            scp_cmd.arg("-p");
-            if let Some(ref port) = ssh_port_opt {
-                scp_cmd.arg("-P").arg(port);
-                scp_cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            let mut scp = Command::new("scp");
+            scp.arg("-p");
+            if let Some(p) = target_port {
+                scp.args(["-P", &p.to_string(), "-o", "StrictHostKeyChecking=no"]);
             }
             for (src, _) in &transfer_files {
-                scp_cmd.arg(src);
+                scp.arg(src);
             }
-            scp_cmd.arg(format!("{}:{}", ssh_host, dest_dir));
-            scp_cmd.status().map(|s| s.success()).unwrap_or(false)
+            scp.arg(format!("{}:{}", ssh_host, dest_dir));
+            scp.status().map(|s| s.success()).unwrap_or(false)
         }
     };
-
-    for tmp in temp_files {
-        let _ = std::fs::remove_file(tmp);
-    }
 
     if success {
         println!("Done: Transfer complete.");
@@ -146,20 +139,11 @@ pub fn run_hsz(args: &[String]) {
                 let full = format!("{}/{}", dest_dir.trim_end_matches('/'), remote_name);
                 let flag = if auto_reveal { "-R" } else { "" };
                 let remote_script = format!("open {} '{}' 2>/dev/null || xdg-open '{}' 2>/dev/null", flag, full, full);
-                let mut ssh = Command::new("ssh");
-                if let Some(ref port) = ssh_port_opt {
-                    ssh.args(["-p", port, "-o", "StrictHostKeyChecking=no"]);
-                }
-                let _ = ssh.arg(&ssh_host).arg(remote_script).status();
+                let _ = ssh_cmd(&ssh_host, target_port).arg(remote_script).status();
             }
         }
     } else {
         eprintln!("Error: Transfer failed.");
         exit(1);
     }
-}
-
-fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    run_hsz(&args);
 }

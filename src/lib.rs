@@ -14,6 +14,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+pub const KEY_STYLE: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+pub const DIM_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
+
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub hostname: String,
@@ -33,49 +36,59 @@ pub struct Config {
 
 impl Config {
     pub fn host_list(&self) -> Vec<String> {
-        if let Some(ref h) = self.hosts {
-            h.clone()
-        } else if let Some(ref o) = self.order {
-            o.clone()
-        } else {
-            Vec::new()
-        }
+        self.hosts.clone().or_else(|| self.order.clone()).unwrap_or_default()
     }
 }
 
 pub fn config_path() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config/hrzsz.toml")
-    } else {
-        PathBuf::from(".hrzsz.toml")
-    }
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".config/hrzsz.toml"))
+        .unwrap_or_else(|_| PathBuf::from(".hrzsz.toml"))
 }
 
 pub fn load_config() -> Config {
-    let p = config_path();
-    if let Ok(content) = std::fs::read_to_string(&p) {
-        toml::from_str(&content).unwrap_or_default()
-    } else {
-        Config::default()
-    }
+    std::fs::read_to_string(config_path())
+        .ok()
+        .and_then(|c| toml::from_str(&c).ok())
+        .unwrap_or_default()
 }
 
 pub fn get_reverse_port() -> u16 {
-    let cfg = load_config();
-    if let Some(p) = cfg.reverse_port {
-        return p;
-    }
-    if let Ok(env_p) = std::env::var("HSZRZ_REVERSE_PORT") {
-        if let Ok(p) = env_p.parse::<u16>() {
-            return p;
-        }
-    }
-    18901
+    load_config().reverse_port.unwrap_or_else(|| {
+        std::env::var("HSZRZ_REVERSE_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(18901)
+    })
 }
 
+#[inline]
 pub fn check_reverse_tunnel(port: u16) -> bool {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+    TcpStream::connect_timeout(&addr, Duration::from_millis(20)).is_ok()
+}
+
+pub fn resolve_target(name: &str) -> (String, Option<u16>) {
+    if let Some(port_str) = name.strip_prefix(':') {
+        if let Ok(p) = port_str.parse::<u16>() {
+            return ("localhost".to_string(), Some(p));
+        }
+    }
+    if let Some((host, port_str)) = name.split_once(':') {
+        if let Ok(p) = port_str.parse::<u16>() {
+            return (host.to_string(), Some(p));
+        }
+    }
+    (name.to_string(), None)
+}
+
+pub fn ssh_cmd(host: &str, port: Option<u16>) -> Command {
+    let mut cmd = Command::new("ssh");
+    if let Some(p) = port {
+        cmd.args(["-p", &p.to_string(), "-o", "StrictHostKeyChecking=no"]);
+    }
+    cmd.arg(host);
+    cmd
 }
 
 pub fn save_config_hosts(visible_peers: &[Peer], removed_set: &HashSet<String>) {
@@ -86,25 +99,22 @@ pub fn save_config_hosts(visible_peers: &[Peer], removed_set: &HashSet<String>) 
     let mut cfg = load_config();
 
     let mut list = Vec::new();
-    // Add visible hosts in their current order
-    for p in visible_peers {
-        if p.reverse_port.is_some() || p.hostname.starts_with(':') || p.hostname.to_lowercase().starts_with("client") {
+    for peer in visible_peers {
+        if peer.reverse_port.is_some() || peer.hostname.starts_with(':') {
             continue;
         }
-        if p.is_custom {
-            list.push(format!("+{}", p.hostname));
+        if peer.is_custom {
+            list.push(format!("+{}", peer.hostname));
         } else {
-            list.push(p.hostname.clone());
+            list.push(peer.hostname.clone());
         }
     }
-
-    // Add removed hosts marked with -
     for r in removed_set {
         list.push(format!("-{}", r));
     }
 
     cfg.hosts = Some(list);
-    cfg.order = None; // Clean legacy order
+    cfg.order = None;
 
     if let Ok(s) = toml::to_string_pretty(&cfg) {
         let _ = std::fs::write(p, s);
@@ -140,41 +150,25 @@ struct TsPeer {
 }
 
 pub fn get_tailscale_peers() -> (Vec<Peer>, HashSet<String>) {
-    let output = Command::new("tailscale")
-        .args(["status", "--json"])
-        .output();
-
-    let output = match output {
+    let output = Command::new("tailscale").args(["status", "--json"]).output();
+    let stdout = match output {
         Ok(o) if o.status.success() => o.stdout,
         _ => return (Vec::new(), HashSet::new()),
     };
 
-    let status: TsStatus = match serde_json::from_slice(&output) {
+    let status: TsStatus = match serde_json::from_slice(&stdout) {
         Ok(s) => s,
         Err(_) => return (Vec::new(), HashSet::new()),
     };
 
-    let self_host = status
-        .self_node
-        .as_ref()
-        .and_then(|s| s.hostname.clone())
-        .unwrap_or_default()
-        .to_lowercase();
-    let self_dns = status
-        .self_node
-        .as_ref()
-        .and_then(|s| s.dns_name.clone())
-        .map(|s| s.split('.').next().unwrap_or("").to_lowercase())
-        .unwrap_or_default();
+    let self_host = status.self_node.as_ref().and_then(|s| s.hostname.clone()).unwrap_or_default().to_lowercase();
+    let self_dns = status.self_node.as_ref().and_then(|s| s.dns_name.clone()).map(|s| s.split('.').next().unwrap_or("").to_lowercase()).unwrap_or_default();
 
     let mut ts_peers = Vec::new();
     if let Some(peer_map) = status.peers {
         for (_, p) in peer_map {
             let hname = p.hostname.unwrap_or_default().trim().to_string();
-            let dns = p
-                .dns_name
-                .map(|d| d.split('.').next().unwrap_or("").trim().to_string())
-                .unwrap_or_default();
+            let dns = p.dns_name.map(|d| d.split('.').next().unwrap_or("").trim().to_string()).unwrap_or_default();
             let online = p.online.unwrap_or(false);
             let os = p.os.unwrap_or_else(|| "unknown".to_string());
 
@@ -200,13 +194,11 @@ pub fn get_tailscale_peers() -> (Vec<Peer>, HashSet<String>) {
     }
 
     let cfg = load_config();
-    let raw_hosts = cfg.host_list();
-
     let mut removed_set = HashSet::new();
     let mut custom_added = Vec::new();
     let mut order_map = HashMap::new();
 
-    for (idx, entry) in raw_hosts.iter().enumerate() {
+    for (idx, entry) in cfg.host_list().iter().enumerate() {
         let trimmed = entry.trim();
         if let Some(stripped) = trimmed.strip_prefix('-') {
             removed_set.insert(stripped.to_lowercase());
@@ -218,13 +210,11 @@ pub fn get_tailscale_peers() -> (Vec<Peer>, HashSet<String>) {
         }
     }
 
-    // Filter out removed peers from Tailscale
     let mut peers: Vec<Peer> = ts_peers
         .into_iter()
         .filter(|p| !removed_set.contains(&p.hostname.to_lowercase()))
         .collect();
 
-    // Add custom added peers
     for (_idx, custom_name) in custom_added {
         if !peers.iter().any(|p| p.hostname.eq_ignore_ascii_case(&custom_name)) {
             peers.push(Peer {
@@ -238,11 +228,9 @@ pub fn get_tailscale_peers() -> (Vec<Peer>, HashSet<String>) {
         }
     }
 
-    // Sort according to order_map
     peers.sort_by(|a, b| {
         let pos_a = order_map.get(&a.hostname.to_lowercase());
         let pos_b = order_map.get(&b.hostname.to_lowercase());
-
         match (pos_a, pos_b) {
             (Some(ia), Some(ib)) => ia.cmp(ib),
             (Some(_), None) => std::cmp::Ordering::Less,
@@ -367,7 +355,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 .direction(Direction::Vertical)
                 .constraints(match mode {
                     AppMode::AddHost => vec![
-                        Constraint::Length(1), // Add input bar
+                        Constraint::Length(1),
                         Constraint::Min(num_rows as u16),
                         Constraint::Length(1),
                     ],
@@ -412,49 +400,44 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         let padded_label = format!("{:<width$}", raw_label, width = col_width);
 
                         let style = if is_selected {
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD)
+                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Reset)
                         };
-                        col_lines.push(ratatui::text::Line::styled(padded_label, style));
+                        col_lines.push(Line::styled(padded_label, style));
                     }
                 }
                 f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
             }
 
-            let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-            let dim_style = Style::default().add_modifier(Modifier::DIM);
-
             let footer_spans = match mode {
                 AppMode::AddHost => vec![
                     Span::raw("  "),
-                    Span::styled("enter", key_style),
-                    Span::styled(" confirm ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("esc", key_style),
-                    Span::styled(" cancel", dim_style),
+                    Span::styled("enter", KEY_STYLE),
+                    Span::styled(" confirm ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("esc", KEY_STYLE),
+                    Span::styled(" cancel", DIM_STYLE),
                 ],
                 AppMode::Normal => vec![
                     Span::raw("  "),
-                    Span::styled("arrows", key_style),
-                    Span::styled(" navigate ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("[ ]", key_style),
-                    Span::styled(" reorder ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("a", key_style),
-                    Span::styled(" add ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("x", key_style),
-                    Span::styled(" rm ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("enter", key_style),
-                    Span::styled(" select ", dim_style),
-                    Span::styled("‧ ", dim_style),
-                    Span::styled("esc", key_style),
-                    Span::styled(" quit", dim_style),
+                    Span::styled("arrows", KEY_STYLE),
+                    Span::styled(" navigate ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("[ ]", KEY_STYLE),
+                    Span::styled(" reorder ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("a", KEY_STYLE),
+                    Span::styled(" add ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("x", KEY_STYLE),
+                    Span::styled(" rm ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("enter", KEY_STYLE),
+                    Span::styled(" select ", DIM_STYLE),
+                    Span::styled("‧ ", DIM_STYLE),
+                    Span::styled("esc", KEY_STYLE),
+                    Span::styled(" quit", DIM_STYLE),
                 ],
             };
 
@@ -476,9 +459,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     KeyCode::Enter => {
                         let trimmed = add_buffer.trim().to_string();
                         if !trimmed.is_empty() {
-                            // If it was in removed_set, restore it
                             removed_set.remove(&trimmed.to_lowercase());
-                            // Add new peer
                             peers.push(Peer {
                                 hostname: trimmed,
                                 os: "ssh".to_string(),
@@ -502,12 +483,8 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     _ => {}
                 },
                 AppMode::Normal => match key.code {
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        break;
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        break;
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                     KeyCode::Enter => {
                         if !peers.is_empty() {
                             chosen_peer = Some(peers[selected_idx].clone());
@@ -519,7 +496,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         add_buffer.clear();
                     }
                     KeyCode::Char('x') => {
-                        // Cannot remove client <port>
                         let is_client = peers.get(selected_idx).map(|p| p.reverse_port.is_some()).unwrap_or(false);
                         if !is_client && !peers.is_empty() {
                             let removed_peer = peers.remove(selected_idx);
@@ -531,18 +507,10 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        if selected_idx > 0 {
-                            selected_idx -= 1;
-                        } else if num_items > 0 {
-                            selected_idx = num_items - 1;
-                        }
+                        selected_idx = if selected_idx > 0 { selected_idx - 1 } else { num_items.saturating_sub(1) };
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        if selected_idx + 1 < num_items {
-                            selected_idx += 1;
-                        } else {
-                            selected_idx = 0;
-                        }
+                        selected_idx = if selected_idx + 1 < num_items { selected_idx + 1 } else { 0 };
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
                         if num_cols == 2 && selected_idx >= num_rows {
@@ -555,16 +523,16 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         }
                     }
                     KeyCode::Char('[') => {
-                        let min_reorder_idx = if has_fixed_client { 2 } else { 1 };
-                        if selected_idx >= min_reorder_idx {
+                        let min_idx = if has_fixed_client { 2 } else { 1 };
+                        if selected_idx >= min_idx {
                             peers.swap(selected_idx, selected_idx - 1);
                             selected_idx -= 1;
                             save_config_hosts(&peers, &removed_set);
                         }
                     }
                     KeyCode::Char(']') => {
-                        let min_reorder_idx = if has_fixed_client { 1 } else { 0 };
-                        if selected_idx >= min_reorder_idx && selected_idx + 1 < num_items {
+                        let min_idx = if has_fixed_client { 1 } else { 0 };
+                        if selected_idx >= min_idx && selected_idx + 1 < num_items {
                             peers.swap(selected_idx, selected_idx + 1);
                             selected_idx += 1;
                             save_config_hosts(&peers, &removed_set);

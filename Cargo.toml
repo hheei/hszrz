@@ -20,11 +20,3 @@ strip = true
 [[bin]]
 name = "hszrz"
 path = "src/main.rs"
-
-[[bin]]
-name = "hsz"
-path = "src/bin/hsz.rs"
-
-[[bin]]
-name = "hrz"
-path = "src/bin/hrz.rs"
