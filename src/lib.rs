@@ -88,7 +88,7 @@ pub fn save_config_hosts(visible_peers: &[Peer], removed_set: &HashSet<String>) 
     let mut list = Vec::new();
     // Add visible hosts in their current order
     for p in visible_peers {
-        if p.reverse_port.is_some() || p.hostname.starts_with('<') || p.hostname.to_lowercase().starts_with("client") {
+        if p.reverse_port.is_some() || p.hostname.starts_with(':') || p.hostname.to_lowercase().starts_with("client") {
             continue;
         }
         if p.is_custom {
@@ -262,7 +262,7 @@ pub fn get_available_peers() -> (Vec<Peer>, HashSet<String>) {
         peers.insert(
             0,
             Peer {
-                hostname: format!("<{}>", rev_port),
+                hostname: format!(":{}", rev_port),
                 os: "ssh".to_string(),
                 online: true,
                 dns: "127.0.0.1".to_string(),
