@@ -3,6 +3,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
@@ -274,9 +275,23 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
             }
 
-            let footer = Paragraph::new("  arrows navigate ‧ [ ] reorder ‧ enter select ‧ esc quit")
-                .alignment(Alignment::Left)
-                .style(Style::default().fg(Color::DarkGray));
+            let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+            let dim_style = Style::default().add_modifier(Modifier::DIM);
+
+            let footer = Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("arrows", key_style),
+                Span::styled(" navigate ", dim_style),
+                Span::styled("‧ ", dim_style),
+                Span::styled("[ ]", key_style),
+                Span::styled(" reorder ", dim_style),
+                Span::styled("‧ ", dim_style),
+                Span::styled("enter", key_style),
+                Span::styled(" select ", dim_style),
+                Span::styled("‧ ", dim_style),
+                Span::styled("esc", key_style),
+                Span::styled(" quit", dim_style),
+            ])).alignment(Alignment::Left);
             f.render_widget(footer, chunks[1]);
         });
 
