@@ -1,8 +1,13 @@
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::Terminal;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, stdout};
 use std::process::Command;
 
 #[derive(Debug, Clone)]
@@ -118,94 +123,25 @@ pub fn is_fuzzy_match(query: &str, target: &str) -> bool {
     true
 }
 
-pub fn read_line_or_esc(prompt: &str) -> Option<String> {
-    print!("{}", prompt);
-    let _ = io::stdout().flush();
+// Helper to center a rect
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
 
-    if enable_raw_mode().is_err() {
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_ok() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed == "q" {
-                return None;
-            }
-            return Some(trimmed.to_string());
-        }
-        return None;
-    }
-
-    let mut input = String::new();
-    loop {
-        if let Ok(Event::Key(key_event)) = event::read() {
-            match key_event.code {
-                KeyCode::Esc => {
-                    let _ = disable_raw_mode();
-                    print!("\r\n");
-                    let _ = io::stdout().flush();
-                    return None;
-                }
-                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let _ = disable_raw_mode();
-                    print!("\r\n");
-                    let _ = io::stdout().flush();
-                    return None;
-                }
-                KeyCode::Enter => {
-                    let _ = disable_raw_mode();
-                    print!("\r\n");
-                    let _ = io::stdout().flush();
-                    break;
-                }
-                KeyCode::Backspace => {
-                    if !input.is_empty() {
-                        input.pop();
-                        print!("\x08 \x08");
-                        let _ = io::stdout().flush();
-                    }
-                }
-                KeyCode::Char(c) => {
-                    input.push(c);
-                    print!("{}", c);
-                    let _ = io::stdout().flush();
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let trimmed = input.trim().to_string();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
-pub fn format_multi_column(items: &[String]) -> Vec<String> {
-    let n = items.len();
-    if n <= 5 {
-        return items.iter().map(|it| format!("  {}", it)).collect();
-    }
-
-    let (term_width, _) = crossterm::terminal::size().unwrap_or((80, 24));
-    let term_width = term_width as usize;
-    let max_len = items.iter().map(|it| it.len()).max().unwrap_or(20);
-    let col_width = max_len + 4;
-    let num_cols = (term_width / col_width).clamp(2, 4);
-    let num_rows = (n + num_cols - 1) / num_cols;
-
-    let mut lines = Vec::new();
-    for r in 0..num_rows {
-        let mut row_str = String::new();
-        for c in 0..num_cols {
-            let idx = r + c * num_rows;
-            if idx < n {
-                row_str.push_str(&format!("{:<width$}", items[idx], width = col_width));
-            }
-        }
-        lines.push(format!("  {}", row_str.trim_end()));
-    }
-    lines
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
@@ -215,59 +151,215 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
         return None;
     }
 
-    let mut candidates = all_peers.clone();
-    let pad_width = all_peers.len().to_string().len();
+    // Setup terminal
+    let _ = enable_raw_mode();
+    let mut stdout = stdout();
+    let _ = crossterm::execute!(stdout, EnterAlternateScreen);
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = match Terminal::new(backend) {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = disable_raw_mode();
+            return None;
+        }
+    };
+
+    let mut selected_idx = 0;
+    let mut search_buf = String::new();
+    let mut chosen_peer: Option<Peer> = None;
 
     loop {
-        let labels: Vec<String> = candidates
+        // Filter candidates based on search buffer
+        let filtered: Vec<&Peer> = all_peers
             .iter()
-            .enumerate()
-            .map(|(idx, p)| {
-                format!(
-                    "[{:>width$}] {} ({})",
-                    idx + 1,
-                    p.hostname,
-                    p.os,
-                    width = pad_width
-                )
+            .filter(|p| {
+                if search_buf.is_empty() {
+                    true
+                } else {
+                    is_fuzzy_match(&search_buf, &p.hostname) || is_fuzzy_match(&search_buf, &p.os)
+                }
             })
             .collect();
 
-        println!("\n📡 {} ({} available):", action_label, candidates.len());
-        for line in format_multi_column(&labels) {
-            println!("{}", line);
+        if selected_idx >= filtered.len() && !filtered.is_empty() {
+            selected_idx = filtered.len() - 1;
         }
 
-        let input = read_line_or_esc("\n❯ Enter # or name (Esc to exit): ");
-        let val = match input {
-            Some(v) => v,
-            None => {
-                println!("Operation cancelled.");
-                return None;
-            }
+        let num_items = filtered.len();
+        let num_cols = if num_items > 5 { 2 } else { 1 };
+        let num_rows = if num_cols > 0 && num_items > 0 {
+            (num_items + num_cols - 1) / num_cols
+        } else {
+            1
         };
 
-        if let Ok(num) = val.parse::<usize>() {
-            if num >= 1 && num <= candidates.len() {
-                return Some(candidates[num - 1].clone());
+        let draw_res = terminal.draw(|f| {
+            let size = f.area();
+            let popup_w = if num_cols == 2 { 68 } else { 45 }.min(size.width.saturating_sub(4));
+            let popup_h = (num_rows as u16 + 6).min(size.height.saturating_sub(4)).max(8);
+
+            let percent_x = ((popup_w as f32 / size.width as f32) * 100.0).clamp(40.0, 95.0) as u16;
+            let percent_y = ((popup_h as f32 / size.height as f32) * 100.0).clamp(30.0, 90.0) as u16;
+
+            let area = centered_rect(percent_x, percent_y, size);
+            f.render_widget(Clear, area);
+
+            let title = format!(" 📡 {} ", action_label);
+            let block = Block::default()
+                .title(title)
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan));
+
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),              // Search prompt
+                    Constraint::Min(2),                 // Grid
+                    Constraint::Length(1),              // Footer
+                ])
+                .split(inner);
+
+            // Search bar
+            let search_text = if search_buf.is_empty() {
+                "  🔍 Type to filter, numbers to jump...".to_string()
+            } else {
+                format!("  🔍 Search: {}█", search_buf)
+            };
+            let search_style = if search_buf.is_empty() {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            };
+            f.render_widget(Paragraph::new(search_text).style(search_style), chunks[0]);
+
+            // Grid items
+            if num_items == 0 {
+                let empty_msg = Paragraph::new("No matching online machines.")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(Color::Red));
+                f.render_widget(empty_msg, chunks[1]);
+            } else {
+                let grid_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints(if num_cols == 2 {
+                        vec![Constraint::Percentage(50), Constraint::Percentage(50)]
+                    } else {
+                        vec![Constraint::Percentage(100)]
+                    })
+                    .split(chunks[1]);
+
+                let pad_width = all_peers.len().to_string().len();
+
+                for c in 0..num_cols {
+                    let mut col_lines = Vec::new();
+                    for r in 0..num_rows {
+                        let idx = r + c * num_rows;
+                        if idx < num_items {
+                            let p = filtered[idx];
+                            // Find absolute index in all_peers for display
+                            let abs_idx = all_peers.iter().position(|x| x.hostname == p.hostname).unwrap_or(idx) + 1;
+                            let is_selected = idx == selected_idx;
+                            let prefix = if is_selected { "❯ " } else { "  " };
+                            let label = format!("{}[{:>width$}] {} ({})", prefix, abs_idx, p.hostname, p.os, width = pad_width);
+
+                            let style = if is_selected {
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::White)
+                            };
+                            col_lines.push(ratatui::text::Line::styled(label, style));
+                        }
+                    }
+                    f.render_widget(Paragraph::new(col_lines), grid_chunks[c]);
+                }
             }
-            eprintln!("⚠️ Please enter a number between 1 and {}.", candidates.len());
-            continue;
+
+            // Footer
+            let footer = Paragraph::new(" [↑↓←→] Move  [Enter] Select  [Esc/q] Quit")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(footer, chunks[2]);
+        });
+
+        if draw_res.is_err() {
+            break;
         }
 
-        let matches: Vec<Peer> = all_peers
-            .iter()
-            .filter(|p| is_fuzzy_match(&val, &p.hostname))
-            .cloned()
-            .collect();
-
-        if matches.len() == 1 {
-            return Some(matches[0].clone());
-        } else if matches.len() > 1 {
-            candidates = matches;
-        } else {
-            eprintln!("⚠️ No hosts matching '{}'. Showing all available hosts.", val);
-            candidates = all_peers.clone();
+        // Handle keys
+        if let Ok(Event::Key(key)) = event::read() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    break;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break;
+                }
+                KeyCode::Enter => {
+                    if !filtered.is_empty() {
+                        chosen_peer = Some(filtered[selected_idx].clone());
+                    }
+                    break;
+                }
+                KeyCode::Up => {
+                    if selected_idx > 0 {
+                        selected_idx -= 1;
+                    } else if !filtered.is_empty() {
+                        selected_idx = filtered.len() - 1;
+                    }
+                }
+                KeyCode::Down => {
+                    if !filtered.is_empty() && selected_idx + 1 < filtered.len() {
+                        selected_idx += 1;
+                    } else {
+                        selected_idx = 0;
+                    }
+                }
+                KeyCode::Left => {
+                    if num_cols == 2 && selected_idx >= num_rows {
+                        selected_idx -= num_rows;
+                    }
+                }
+                KeyCode::Right => {
+                    if num_cols == 2 && selected_idx + num_rows < filtered.len() {
+                        selected_idx += num_rows;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if !search_buf.is_empty() {
+                        search_buf.pop();
+                        selected_idx = 0;
+                    }
+                }
+                KeyCode::Char(c) if c.is_digit(10) => {
+                    let digit = c.to_digit(10).unwrap_or(0) as usize;
+                    if digit > 0 && digit <= all_peers.len() {
+                        let target_peer = &all_peers[digit - 1];
+                        if let Some(pos) = filtered.iter().position(|p| p.hostname == target_peer.hostname) {
+                            selected_idx = pos;
+                        }
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    search_buf.push(c);
+                    selected_idx = 0;
+                }
+                _ => {}
+            }
         }
     }
+
+    // Clean terminal
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
+
+    chosen_peer
 }
