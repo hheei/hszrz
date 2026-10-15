@@ -108,21 +108,6 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
     peers
 }
 
-pub fn is_fuzzy_match(query: &str, target: &str) -> bool {
-    let q = query.to_lowercase();
-    let t = target.to_lowercase();
-    if t.contains(&q) {
-        return true;
-    }
-    let mut t_chars = t.chars();
-    for qc in q.chars() {
-        if !t_chars.any(|tc| tc == qc) {
-            return false;
-        }
-    }
-    true
-}
-
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -144,8 +129,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
-    let all_peers = get_tailscale_peers();
-    if all_peers.is_empty() {
+    let peers = get_tailscale_peers();
+    if peers.is_empty() {
         eprintln!("Error: No reachable online Tailscale peers found.");
         return None;
     }
@@ -163,46 +148,26 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
     };
 
     let mut selected_idx = 0;
-    let mut search_buf = String::new();
     let mut chosen_peer: Option<Peer> = None;
 
+    let num_items = peers.len();
+    let num_cols = if num_items > 5 { 2 } else { 1 };
+    let num_rows = (num_items + num_cols - 1) / num_cols;
+
     loop {
-        let filtered: Vec<&Peer> = all_peers
-            .iter()
-            .filter(|p| {
-                if search_buf.is_empty() {
-                    true
-                } else {
-                    is_fuzzy_match(&search_buf, &p.hostname) || is_fuzzy_match(&search_buf, &p.os)
-                }
-            })
-            .collect();
-
-        if selected_idx >= filtered.len() && !filtered.is_empty() {
-            selected_idx = filtered.len() - 1;
-        }
-
-        let num_items = filtered.len();
-        let num_cols = if num_items > 5 { 2 } else { 1 };
-        let num_rows = if num_cols > 0 && num_items > 0 {
-            (num_items + num_cols - 1) / num_cols
-        } else {
-            1
-        };
-
         let draw_res = terminal.draw(|f| {
             let size = f.area();
-            let popup_w = if num_cols == 2 { 68 } else { 45 }.min(size.width.saturating_sub(4));
-            let popup_h = (num_rows as u16 + 6).min(size.height.saturating_sub(4)).max(8);
+            let popup_w = if num_cols == 2 { 64 } else { 42 }.min(size.width.saturating_sub(4));
+            let popup_h = (num_rows as u16 + 4).min(size.height.saturating_sub(4)).max(6);
 
-            let percent_x = ((popup_w as f32 / size.width as f32) * 100.0).clamp(40.0, 95.0) as u16;
-            let percent_y = ((popup_h as f32 / size.height as f32) * 100.0).clamp(30.0, 90.0) as u16;
+            let percent_x = ((popup_w as f32 / size.width as f32) * 100.0).clamp(35.0, 95.0) as u16;
+            let percent_y = ((popup_h as f32 / size.height as f32) * 100.0).clamp(25.0, 90.0) as u16;
 
             let area = centered_rect(percent_x, percent_y, size);
             f.render_widget(Clear, area);
 
-            // Left-aligned title with rounded border
-            let title = format!(" [ {} ] ", action_label);
+            // Left-aligned title without brackets
+            let title = format!(" {} ", action_label);
             let block = Block::default()
                 .title(title)
                 .title_alignment(Alignment::Left)
@@ -216,74 +181,53 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(2),
-                    Constraint::Length(1),
+                    Constraint::Min(num_rows as u16),   // Grid
+                    Constraint::Length(1),              // Footer
                 ])
                 .split(inner);
 
-            // Left-aligned search bar
-            let search_text = if search_buf.is_empty() {
-                "  Filter: (type to search, 1-9 to jump)".to_string()
-            } else {
-                format!("  Filter: {}_", search_buf)
-            };
-            let search_style = if search_buf.is_empty() {
-                Style::default().fg(Color::DarkGray)
-            } else {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            };
-            f.render_widget(Paragraph::new(search_text).style(search_style).alignment(Alignment::Left), chunks[0]);
-
             // Grid items
-            if num_items == 0 {
-                let empty_msg = Paragraph::new("  No matching machines.")
-                    .alignment(Alignment::Left)
-                    .style(Style::default().fg(Color::Red));
-                f.render_widget(empty_msg, chunks[1]);
-            } else {
-                let grid_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints(if num_cols == 2 {
-                        vec![Constraint::Percentage(50), Constraint::Percentage(50)]
-                    } else {
-                        vec![Constraint::Percentage(100)]
-                    })
-                    .split(chunks[1]);
+            let grid_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(if num_cols == 2 {
+                    vec![Constraint::Percentage(50), Constraint::Percentage(50)]
+                } else {
+                    vec![Constraint::Percentage(100)]
+                })
+                .split(chunks[0]);
 
-                let pad_width = all_peers.len().to_string().len();
+            let pad_width = peers.len().to_string().len();
 
-                for c in 0..num_cols {
-                    let mut col_lines = Vec::new();
-                    for r in 0..num_rows {
-                        let idx = r + c * num_rows;
-                        if idx < num_items {
-                            let p = filtered[idx];
-                            let abs_idx = all_peers.iter().position(|x| x.hostname == p.hostname).unwrap_or(idx) + 1;
-                            let is_selected = idx == selected_idx;
-                            let prefix = if is_selected { "> " } else { "  " };
-                            let label = format!("{}[{:>width$}] {} ({})", prefix, abs_idx, p.hostname, p.os, width = pad_width);
+            for c in 0..num_cols {
+                let mut col_lines = Vec::new();
+                for r in 0..num_rows {
+                    let idx = r + c * num_rows;
+                    if idx < num_items {
+                        let p = &peers[idx];
+                        let is_selected = idx == selected_idx;
+                        let prefix = if is_selected { "> " } else { "  " };
+                        // Numbers without brackets: " 1. name (os)"
+                        let label = format!("{}{:>width$}. {} ({})", prefix, idx + 1, p.hostname, p.os, width = pad_width);
 
-                            let style = if is_selected {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(Color::White)
-                            };
-                            col_lines.push(ratatui::text::Line::styled(label, style));
-                        }
+                        let style = if is_selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        col_lines.push(ratatui::text::Line::styled(label, style));
                     }
-                    f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
                 }
+                f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
             }
 
-            // Left-aligned footer
-            let footer = Paragraph::new("  [Arrows] Move  [Enter] Select  [Esc/q] Quit")
+            // Minimalist footer connected by middle dots
+            let footer = Paragraph::new("  arrows navigate ‧ enter select ‧ esc quit")
                 .alignment(Alignment::Left)
                 .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(footer, chunks[2]);
+            f.render_widget(footer, chunks[1]);
         });
 
         if draw_res.is_err() {
@@ -299,20 +243,18 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     break;
                 }
                 KeyCode::Enter => {
-                    if !filtered.is_empty() {
-                        chosen_peer = Some(filtered[selected_idx].clone());
-                    }
+                    chosen_peer = Some(peers[selected_idx].clone());
                     break;
                 }
                 KeyCode::Up => {
                     if selected_idx > 0 {
                         selected_idx -= 1;
-                    } else if !filtered.is_empty() {
-                        selected_idx = filtered.len() - 1;
+                    } else {
+                        selected_idx = num_items - 1;
                     }
                 }
                 KeyCode::Down => {
-                    if !filtered.is_empty() && selected_idx + 1 < filtered.len() {
+                    if selected_idx + 1 < num_items {
                         selected_idx += 1;
                     } else {
                         selected_idx = 0;
@@ -324,28 +266,15 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     }
                 }
                 KeyCode::Right => {
-                    if num_cols == 2 && selected_idx + num_rows < filtered.len() {
+                    if num_cols == 2 && selected_idx + num_rows < num_items {
                         selected_idx += num_rows;
-                    }
-                }
-                KeyCode::Backspace => {
-                    if !search_buf.is_empty() {
-                        search_buf.pop();
-                        selected_idx = 0;
                     }
                 }
                 KeyCode::Char(c) if c.is_digit(10) => {
                     let digit = c.to_digit(10).unwrap_or(0) as usize;
-                    if digit > 0 && digit <= all_peers.len() {
-                        let target_peer = &all_peers[digit - 1];
-                        if let Some(pos) = filtered.iter().position(|p| p.hostname == target_peer.hostname) {
-                            selected_idx = pos;
-                        }
+                    if digit > 0 && digit <= num_items {
+                        selected_idx = digit - 1;
                     }
-                }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    search_buf.push(c);
-                    selected_idx = 0;
                 }
                 _ => {}
             }
