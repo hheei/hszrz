@@ -9,8 +9,10 @@ use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::stdout;
+use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -18,11 +20,13 @@ pub struct Peer {
     pub os: String,
     pub online: bool,
     pub dns: String,
+    pub reverse_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub order: Option<Vec<String>>,
+    pub reverse_port: Option<u16>,
 }
 
 pub fn config_path() -> PathBuf {
@@ -42,14 +46,38 @@ pub fn load_config() -> Config {
     }
 }
 
+pub fn get_reverse_port() -> u16 {
+    let cfg = load_config();
+    if let Some(p) = cfg.reverse_port {
+        return p;
+    }
+    if let Ok(env_p) = std::env::var("HSZRZ_REVERSE_PORT") {
+        if let Ok(p) = env_p.parse::<u16>() {
+            return p;
+        }
+    }
+    18901
+}
+
+pub fn check_reverse_tunnel(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
+}
+
 pub fn save_config_order(order: &[String]) {
     let p = config_path();
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let cfg = Config {
-        order: Some(order.to_vec()),
-    };
+    let mut cfg = load_config();
+    // Exclude "client" from persisted order
+    let clean_order: Vec<String> = order
+        .iter()
+        .filter(|h| !h.to_lowercase().starts_with("client"))
+        .cloned()
+        .collect();
+    cfg.order = Some(clean_order);
+
     if let Ok(s) = toml::to_string_pretty(&cfg) {
         let _ = std::fs::write(p, s);
     }
@@ -137,6 +165,7 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
                 os,
                 online,
                 dns,
+                reverse_port: None,
             });
         }
     }
@@ -161,6 +190,25 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
     peers
 }
 
+pub fn get_available_peers() -> Vec<Peer> {
+    let mut peers = get_tailscale_peers();
+    let rev_port = get_reverse_port();
+
+    if check_reverse_tunnel(rev_port) {
+        peers.insert(
+            0,
+            Peer {
+                hostname: format!("client {}", rev_port),
+                os: "ssh".to_string(),
+                online: true,
+                dns: "127.0.0.1".to_string(),
+                reverse_port: Some(rev_port),
+            },
+        );
+    }
+    peers
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -182,11 +230,13 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
-    let mut peers = get_tailscale_peers();
+    let mut peers = get_available_peers();
     if peers.is_empty() {
-        eprintln!("Error: No reachable online Tailscale peers found.");
+        eprintln!("Error: No reachable Tailscale peers or SSH reverse tunnels found.");
         return None;
     }
+
+    let has_fixed_client = peers.first().map(|p| p.reverse_port.is_some()).unwrap_or(false);
 
     let _ = enable_raw_mode();
     let mut stdout = stdout();
@@ -335,7 +385,9 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     }
                 }
                 KeyCode::Char('[') => {
-                    if selected_idx > 0 {
+                    // Cannot reorder client, and cannot move items above client
+                    let min_reorder_idx = if has_fixed_client { 2 } else { 1 };
+                    if selected_idx >= min_reorder_idx {
                         peers.swap(selected_idx, selected_idx - 1);
                         selected_idx -= 1;
                         let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
@@ -343,7 +395,9 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     }
                 }
                 KeyCode::Char(']') => {
-                    if selected_idx + 1 < num_items {
+                    // Cannot reorder client
+                    let min_reorder_idx = if has_fixed_client { 1 } else { 0 };
+                    if selected_idx >= min_reorder_idx && selected_idx + 1 < num_items {
                         peers.swap(selected_idx, selected_idx + 1);
                         selected_idx += 1;
                         let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();

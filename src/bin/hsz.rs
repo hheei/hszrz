@@ -1,4 +1,4 @@
-use hszrz::pick_host_interactive;
+use hszrz::{pick_host_interactive, Peer};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -28,7 +28,7 @@ pub fn run_hsz(args: &[String]) {
             "-o" | "--open" => auto_open = true,
             "-r" | "--reveal" => auto_reveal = true,
             "-h" | "--help" => {
-                println!("hsz — Send files/directories to target Tailscale node");
+                println!("hsz — Send files/directories to target machine");
                 println!("Usage: hsz [options] <files/dirs...>");
                 println!("Options:");
                 println!("  -t, --to <host>   Target host (skips selection menu)");
@@ -46,7 +46,8 @@ pub fn run_hsz(args: &[String]) {
     }
 
     if paths.is_empty() {
-        eprintln!("Usage: hsz <files/dirs...>");
+        eprintln!("Error: No files or directories specified.");
+        eprintln!("Usage: hsz [options] <files/dirs...>");
         exit(1);
     }
 
@@ -57,13 +58,17 @@ pub fn run_hsz(args: &[String]) {
         }
     }
 
-    let host = match target_host {
-        Some(h) => h,
+    let (host, reverse_port) = match target_host {
+        Some(h) => (h, None),
         None => match pick_host_interactive("Select Destination Machine") {
-            Some(p) => p.hostname,
+            Some(p) => (p.hostname, p.reverse_port),
             None => exit(0),
         },
     };
+
+    let is_client = reverse_port.is_some();
+    let ssh_host = if is_client { "localhost".to_string() } else { host.clone() };
+    let ssh_port_opt = reverse_port.map(|p| p.to_string());
 
     let mut transfer_files: Vec<(PathBuf, String)> = Vec::new();
     let mut temp_files: Vec<PathBuf> = Vec::new();
@@ -104,27 +109,32 @@ pub fn run_hsz(args: &[String]) {
     println!("Sending to {}:{}", host, dest_dir);
     let mut cmd = Command::new("rsync");
     cmd.arg("-ahP");
+    if let Some(ref port) = ssh_port_opt {
+        cmd.arg("-e").arg(format!("ssh -p {} -o StrictHostKeyChecking=no", port));
+    }
     for (src, _) in &transfer_files {
         cmd.arg(src);
     }
-    cmd.arg(format!("{}:{}", host, dest_dir));
+    cmd.arg(format!("{}:{}", ssh_host, dest_dir));
 
     let run_res = cmd.status();
     let success = match run_res {
         Ok(s) if s.success() => true,
         _ => {
-            // Fallback to scp
             let mut scp_cmd = Command::new("scp");
             scp_cmd.arg("-p");
+            if let Some(ref port) = ssh_port_opt {
+                scp_cmd.arg("-P").arg(port);
+                scp_cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            }
             for (src, _) in &transfer_files {
                 scp_cmd.arg(src);
             }
-            scp_cmd.arg(format!("{}:{}", host, dest_dir));
+            scp_cmd.arg(format!("{}:{}", ssh_host, dest_dir));
             scp_cmd.status().map(|s| s.success()).unwrap_or(false)
         }
     };
 
-    // Clean temp
     for tmp in temp_files {
         let _ = std::fs::remove_file(tmp);
     }
@@ -136,7 +146,11 @@ pub fn run_hsz(args: &[String]) {
                 let full = format!("{}/{}", dest_dir.trim_end_matches('/'), remote_name);
                 let flag = if auto_reveal { "-R" } else { "" };
                 let remote_script = format!("open {} '{}' 2>/dev/null || xdg-open '{}' 2>/dev/null", flag, full, full);
-                let _ = Command::new("ssh").arg(&host).arg(remote_script).status();
+                let mut ssh = Command::new("ssh");
+                if let Some(ref port) = ssh_port_opt {
+                    ssh.args(["-p", port, "-o", "StrictHostKeyChecking=no"]);
+                }
+                let _ = ssh.arg(&ssh_host).arg(remote_script).status();
             }
         }
     } else {
