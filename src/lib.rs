@@ -263,8 +263,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
 
                         let style = if is_selected {
                             Style::default()
-                                .fg(Color::Black)
-                                .bg(Color::Cyan)
+                                .fg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Reset)
