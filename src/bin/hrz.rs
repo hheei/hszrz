@@ -34,6 +34,7 @@ pub fn run_hrz(args: &[String]) {
             online: true,
             dns: String::new(),
             reverse_port: None,
+            is_custom: false,
         },
         None => match pick_host_interactive("Select Source Machine To Upload From") {
             Some(p) => p,
