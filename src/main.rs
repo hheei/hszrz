@@ -39,7 +39,7 @@ fn main() {
         "send" | "s" | "sz" => hsz::run_hsz(&rest),
         "recv" | "r" | "rz" => hrz::run_hrz(&rest),
         "hosts" | "list" | "ls" => {
-            let peers = hszrz::get_tailscale_peers();
+            let (peers, _) = hszrz::get_tailscale_peers();
             println!("Online Tailscale Peers ({} total):", peers.len());
             for p in peers {
                 println!("  - {:<16} ({})", p.hostname, p.os);
