@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::stdout;
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -21,12 +21,26 @@ pub struct Peer {
     pub online: bool,
     pub dns: String,
     pub reverse_port: Option<u16>,
+    pub is_custom: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
+    pub hosts: Option<Vec<String>>,
     pub order: Option<Vec<String>>,
     pub reverse_port: Option<u16>,
+}
+
+impl Config {
+    pub fn host_list(&self) -> Vec<String> {
+        if let Some(ref h) = self.hosts {
+            h.clone()
+        } else if let Some(ref o) = self.order {
+            o.clone()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -64,19 +78,33 @@ pub fn check_reverse_tunnel(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok()
 }
 
-pub fn save_config_order(order: &[String]) {
+pub fn save_config_hosts(visible_peers: &[Peer], removed_set: &HashSet<String>) {
     let p = config_path();
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let mut cfg = load_config();
-    // Exclude "client" from persisted order
-    let clean_order: Vec<String> = order
-        .iter()
-        .filter(|h| !h.to_lowercase().starts_with("client"))
-        .cloned()
-        .collect();
-    cfg.order = Some(clean_order);
+
+    let mut list = Vec::new();
+    // Add visible hosts in their current order
+    for p in visible_peers {
+        if p.reverse_port.is_some() || p.hostname.to_lowercase().starts_with("client") {
+            continue;
+        }
+        if p.is_custom {
+            list.push(format!("+{}", p.hostname));
+        } else {
+            list.push(p.hostname.clone());
+        }
+    }
+
+    // Add removed hosts marked with -
+    for r in removed_set {
+        list.push(format!("-{}", r));
+    }
+
+    cfg.hosts = Some(list);
+    cfg.order = None; // Clean legacy order
 
     if let Ok(s) = toml::to_string_pretty(&cfg) {
         let _ = std::fs::write(p, s);
@@ -111,19 +139,19 @@ struct TsPeer {
     dns_name: Option<String>,
 }
 
-pub fn get_tailscale_peers() -> Vec<Peer> {
+pub fn get_tailscale_peers() -> (Vec<Peer>, HashSet<String>) {
     let output = Command::new("tailscale")
         .args(["status", "--json"])
         .output();
 
     let output = match output {
         Ok(o) if o.status.success() => o.stdout,
-        _ => return Vec::new(),
+        _ => return (Vec::new(), HashSet::new()),
     };
 
     let status: TsStatus = match serde_json::from_slice(&output) {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), HashSet::new()),
     };
 
     let self_host = status
@@ -139,7 +167,7 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
         .map(|s| s.split('.').next().unwrap_or("").to_lowercase())
         .unwrap_or_default();
 
-    let mut peers = Vec::new();
+    let mut ts_peers = Vec::new();
     if let Some(peer_map) = status.peers {
         for (_, p) in peer_map {
             let hname = p.hostname.unwrap_or_default().trim().to_string();
@@ -160,38 +188,74 @@ pub fn get_tailscale_peers() -> Vec<Peer> {
                 continue;
             }
 
-            peers.push(Peer {
+            ts_peers.push(Peer {
                 hostname: hname,
                 os,
                 online,
                 dns,
                 reverse_port: None,
+                is_custom: false,
             });
         }
     }
 
     let cfg = load_config();
-    if let Some(order) = cfg.order {
-        peers.sort_by(|a, b| {
-            let pos_a = order.iter().position(|h| h.eq_ignore_ascii_case(&a.hostname));
-            let pos_b = order.iter().position(|h| h.eq_ignore_ascii_case(&b.hostname));
+    let raw_hosts = cfg.host_list();
 
-            match (pos_a, pos_b) {
-                (Some(ia), Some(ib)) => ia.cmp(&ib),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
-            }
-        });
-    } else {
-        peers.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+    let mut removed_set = HashSet::new();
+    let mut custom_added = Vec::new();
+    let mut order_map = HashMap::new();
+
+    for (idx, entry) in raw_hosts.iter().enumerate() {
+        let trimmed = entry.trim();
+        if let Some(stripped) = trimmed.strip_prefix('-') {
+            removed_set.insert(stripped.to_lowercase());
+        } else if let Some(stripped) = trimmed.strip_prefix('+') {
+            custom_added.push((idx, stripped.to_string()));
+            order_map.insert(stripped.to_lowercase(), idx);
+        } else {
+            order_map.insert(trimmed.to_lowercase(), idx);
+        }
     }
 
-    peers
+    // Filter out removed peers from Tailscale
+    let mut peers: Vec<Peer> = ts_peers
+        .into_iter()
+        .filter(|p| !removed_set.contains(&p.hostname.to_lowercase()))
+        .collect();
+
+    // Add custom added peers
+    for (_idx, custom_name) in custom_added {
+        if !peers.iter().any(|p| p.hostname.eq_ignore_ascii_case(&custom_name)) {
+            peers.push(Peer {
+                hostname: custom_name,
+                os: "ssh".to_string(),
+                online: true,
+                dns: String::new(),
+                reverse_port: None,
+                is_custom: true,
+            });
+        }
+    }
+
+    // Sort according to order_map
+    peers.sort_by(|a, b| {
+        let pos_a = order_map.get(&a.hostname.to_lowercase());
+        let pos_b = order_map.get(&b.hostname.to_lowercase());
+
+        match (pos_a, pos_b) {
+            (Some(ia), Some(ib)) => ia.cmp(ib),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
+        }
+    });
+
+    (peers, removed_set)
 }
 
-pub fn get_available_peers() -> Vec<Peer> {
-    let mut peers = get_tailscale_peers();
+pub fn get_available_peers() -> (Vec<Peer>, HashSet<String>) {
+    let (mut peers, removed_set) = get_tailscale_peers();
     let rev_port = get_reverse_port();
 
     if check_reverse_tunnel(rev_port) {
@@ -203,10 +267,11 @@ pub fn get_available_peers() -> Vec<Peer> {
                 online: true,
                 dns: "127.0.0.1".to_string(),
                 reverse_port: Some(rev_port),
+                is_custom: false,
             },
         );
     }
-    peers
+    (peers, removed_set)
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -229,14 +294,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+enum AppMode {
+    Normal,
+    AddHost,
+}
+
 pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
-    let mut peers = get_available_peers();
+    let (mut peers, mut removed_set) = get_available_peers();
     if peers.is_empty() {
         eprintln!("Error: No reachable Tailscale peers or SSH reverse tunnels found.");
         return None;
     }
-
-    let has_fixed_client = peers.first().map(|p| p.reverse_port.is_some()).unwrap_or(false);
 
     let _ = enable_raw_mode();
     let mut stdout = stdout();
@@ -252,16 +320,31 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
 
     let mut selected_idx = 0;
     let mut chosen_peer: Option<Peer> = None;
-
-    let num_items = peers.len();
-    let num_cols = if num_items > 5 { 2 } else { 1 };
-    let num_rows = (num_items + num_cols - 1) / num_cols;
+    let mut mode = AppMode::Normal;
+    let mut add_buffer = String::new();
 
     loop {
+        let has_fixed_client = peers.first().map(|p| p.reverse_port.is_some()).unwrap_or(false);
+        let num_items = peers.len();
+        let num_cols = if num_items > 5 { 2 } else { 1 };
+        let num_rows = if num_cols > 0 && num_items > 0 {
+            (num_items + num_cols - 1) / num_cols
+        } else {
+            1
+        };
+
+        if selected_idx >= num_items && num_items > 0 {
+            selected_idx = num_items - 1;
+        }
+
         let draw_res = terminal.draw(|f| {
             let size = f.area();
-            let popup_w = if num_cols == 2 { 52 } else { 32 }.min(size.width.saturating_sub(4));
-            let popup_h = (num_rows as u16 + 4).min(size.height.saturating_sub(4)).max(6);
+            let popup_w = if num_cols == 2 { 56 } else { 36 }.min(size.width.saturating_sub(4));
+            let extra_lines = match mode {
+                AppMode::AddHost => 6,
+                AppMode::Normal => 4,
+            };
+            let popup_h = (num_rows as u16 + extra_lines).min(size.height.saturating_sub(4)).max(6);
 
             let percent_x = ((popup_w as f32 / size.width as f32) * 100.0).clamp(35.0, 95.0) as u16;
             let percent_y = ((popup_h as f32 / size.height as f32) * 100.0).clamp(25.0, 90.0) as u16;
@@ -282,11 +365,28 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(num_rows as u16),
-                    Constraint::Length(1),
-                ])
+                .constraints(match mode {
+                    AppMode::AddHost => vec![
+                        Constraint::Length(1), // Add input bar
+                        Constraint::Min(num_rows as u16),
+                        Constraint::Length(1),
+                    ],
+                    AppMode::Normal => vec![
+                        Constraint::Min(num_rows as u16),
+                        Constraint::Length(1),
+                    ],
+                })
                 .split(inner);
+
+            let (grid_chunk, footer_chunk) = match mode {
+                AppMode::AddHost => {
+                    let input_text = format!("  Add host: {}█", add_buffer);
+                    let input_para = Paragraph::new(input_text).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+                    f.render_widget(input_para, chunks[0]);
+                    (chunks[1], chunks[2])
+                }
+                AppMode::Normal => (chunks[0], chunks[1]),
+            };
 
             let grid_chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -295,7 +395,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 } else {
                     vec![Constraint::Percentage(100)]
                 })
-                .split(chunks[0]);
+                .split(grid_chunk);
 
             let pad_width = peers.len().to_string().len();
 
@@ -327,21 +427,39 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             let key_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
             let dim_style = Style::default().add_modifier(Modifier::DIM);
 
-            let footer = Paragraph::new(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("arrows", key_style),
-                Span::styled(" navigate ", dim_style),
-                Span::styled("‧ ", dim_style),
-                Span::styled("[ ]", key_style),
-                Span::styled(" reorder ", dim_style),
-                Span::styled("‧ ", dim_style),
-                Span::styled("enter", key_style),
-                Span::styled(" select ", dim_style),
-                Span::styled("‧ ", dim_style),
-                Span::styled("esc", key_style),
-                Span::styled(" quit", dim_style),
-            ])).alignment(Alignment::Left);
-            f.render_widget(footer, chunks[1]);
+            let footer_spans = match mode {
+                AppMode::AddHost => vec![
+                    Span::raw("  "),
+                    Span::styled("enter", key_style),
+                    Span::styled(" confirm ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("esc", key_style),
+                    Span::styled(" cancel", dim_style),
+                ],
+                AppMode::Normal => vec![
+                    Span::raw("  "),
+                    Span::styled("arrows", key_style),
+                    Span::styled(" navigate ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("[ ]", key_style),
+                    Span::styled(" reorder ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("a", key_style),
+                    Span::styled(" add ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("x", key_style),
+                    Span::styled(" rm ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("enter", key_style),
+                    Span::styled(" select ", dim_style),
+                    Span::styled("‧ ", dim_style),
+                    Span::styled("esc", key_style),
+                    Span::styled(" quit", dim_style),
+                ],
+            };
+
+            let footer = Paragraph::new(Line::from(footer_spans)).alignment(Alignment::Left);
+            f.render_widget(footer, footer_chunk);
         });
 
         if draw_res.is_err() {
@@ -349,62 +467,111 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
         }
 
         if let Ok(Event::Key(key)) = event::read() {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    break;
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    break;
-                }
-                KeyCode::Enter => {
-                    chosen_peer = Some(peers[selected_idx].clone());
-                    break;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if selected_idx > 0 {
-                        selected_idx -= 1;
-                    } else {
-                        selected_idx = num_items - 1;
+            match mode {
+                AppMode::AddHost => match key.code {
+                    KeyCode::Esc => {
+                        mode = AppMode::Normal;
+                        add_buffer.clear();
                     }
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if selected_idx + 1 < num_items {
-                        selected_idx += 1;
-                    } else {
-                        selected_idx = 0;
+                    KeyCode::Enter => {
+                        let trimmed = add_buffer.trim().to_string();
+                        if !trimmed.is_empty() {
+                            // If it was in removed_set, restore it
+                            removed_set.remove(&trimmed.to_lowercase());
+                            // Add new peer
+                            peers.push(Peer {
+                                hostname: trimmed,
+                                os: "ssh".to_string(),
+                                online: true,
+                                dns: String::new(),
+                                reverse_port: None,
+                                is_custom: true,
+                            });
+                            selected_idx = peers.len() - 1;
+                            save_config_hosts(&peers, &removed_set);
+                        }
+                        mode = AppMode::Normal;
+                        add_buffer.clear();
                     }
-                }
-                KeyCode::Left | KeyCode::Char('h') => {
-                    if num_cols == 2 && selected_idx >= num_rows {
-                        selected_idx -= num_rows;
+                    KeyCode::Backspace => {
+                        add_buffer.pop();
                     }
-                }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    if num_cols == 2 && selected_idx + num_rows < num_items {
-                        selected_idx += num_rows;
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        add_buffer.push(c);
                     }
-                }
-                KeyCode::Char('[') => {
-                    // Cannot reorder client, and cannot move items above client
-                    let min_reorder_idx = if has_fixed_client { 2 } else { 1 };
-                    if selected_idx >= min_reorder_idx {
-                        peers.swap(selected_idx, selected_idx - 1);
-                        selected_idx -= 1;
-                        let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
-                        save_config_order(&order);
+                    _ => {}
+                },
+                AppMode::Normal => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        break;
                     }
-                }
-                KeyCode::Char(']') => {
-                    // Cannot reorder client
-                    let min_reorder_idx = if has_fixed_client { 1 } else { 0 };
-                    if selected_idx >= min_reorder_idx && selected_idx + 1 < num_items {
-                        peers.swap(selected_idx, selected_idx + 1);
-                        selected_idx += 1;
-                        let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
-                        save_config_order(&order);
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        break;
                     }
-                }
-                _ => {}
+                    KeyCode::Enter => {
+                        if !peers.is_empty() {
+                            chosen_peer = Some(peers[selected_idx].clone());
+                        }
+                        break;
+                    }
+                    KeyCode::Char('a') => {
+                        mode = AppMode::AddHost;
+                        add_buffer.clear();
+                    }
+                    KeyCode::Char('x') => {
+                        // Cannot remove client <port>
+                        let is_client = peers.get(selected_idx).map(|p| p.reverse_port.is_some()).unwrap_or(false);
+                        if !is_client && !peers.is_empty() {
+                            let removed_peer = peers.remove(selected_idx);
+                            removed_set.insert(removed_peer.hostname.to_lowercase());
+                            if selected_idx >= peers.len() && !peers.is_empty() {
+                                selected_idx = peers.len() - 1;
+                            }
+                            save_config_hosts(&peers, &removed_set);
+                        }
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if selected_idx > 0 {
+                            selected_idx -= 1;
+                        } else if num_items > 0 {
+                            selected_idx = num_items - 1;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected_idx + 1 < num_items {
+                            selected_idx += 1;
+                        } else {
+                            selected_idx = 0;
+                        }
+                    }
+                    KeyCode::Left | KeyCode::Char('h') => {
+                        if num_cols == 2 && selected_idx >= num_rows {
+                            selected_idx -= num_rows;
+                        }
+                    }
+                    KeyCode::Right | KeyCode::Char('l') => {
+                        if num_cols == 2 && selected_idx + num_rows < num_items {
+                            selected_idx += num_rows;
+                        }
+                    }
+                    KeyCode::Char('[') => {
+                        let min_reorder_idx = if has_fixed_client { 2 } else { 1 };
+                        if selected_idx >= min_reorder_idx {
+                            peers.swap(selected_idx, selected_idx - 1);
+                            selected_idx -= 1;
+                            save_config_hosts(&peers, &removed_set);
+                        }
+                    }
+                    KeyCode::Char(']') => {
+                        let min_reorder_idx = if has_fixed_client { 1 } else { 0 };
+                        if selected_idx >= min_reorder_idx && selected_idx + 1 < num_items {
+                            peers.swap(selected_idx, selected_idx + 1);
+                            selected_idx += 1;
+                            save_config_hosts(&peers, &removed_set);
+                        }
+                    }
+                    _ => {}
+                },
             }
         }
     }
