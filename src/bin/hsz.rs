@@ -66,7 +66,7 @@ pub fn run_hsz(args: &[String]) {
         },
     };
 
-    let is_client = reverse_port.is_some();
+    let is_client = reverse_port.is_some() || host.starts_with('<');
     let ssh_host = if is_client { "localhost".to_string() } else { host.clone() };
     let ssh_port_opt = reverse_port.map(|p| p.to_string());
 

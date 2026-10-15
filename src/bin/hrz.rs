@@ -44,7 +44,7 @@ pub fn run_hrz(args: &[String]) {
 
     println!("Waiting for file selection on {}...", peer.hostname);
 
-    let is_client = peer.reverse_port.is_some();
+    let is_client = peer.reverse_port.is_some() || peer.hostname.starts_with('<');
     let ssh_host = if is_client { "localhost".to_string() } else { peer.hostname.clone() };
     let port_str = peer.reverse_port.map(|p| p.to_string());
 
