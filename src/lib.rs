@@ -250,13 +250,15 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
 
             for c in 0..num_cols {
                 let mut col_lines = Vec::new();
+                let col_width = (grid_chunks[c].width as usize).saturating_sub(1);
                 for r in 0..num_rows {
                     let idx = r + c * num_rows;
                     if idx < num_items {
                         let p = &peers[idx];
                         let is_selected = idx == selected_idx;
                         let prefix = if is_selected { "> " } else { "  " };
-                        let label = format!("{}{:>width$}. {}", prefix, idx + 1, p.hostname, width = pad_width);
+                        let raw_label = format!("{}{:>width$}. {}", prefix, idx + 1, p.hostname, width = pad_width);
+                        let padded_label = format!("{:<width$}", raw_label, width = col_width);
 
                         let style = if is_selected {
                             Style::default()
@@ -264,9 +266,9 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                                 .bg(Color::Cyan)
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(Color::White)
+                            Style::default().fg(Color::Reset)
                         };
-                        col_lines.push(ratatui::text::Line::styled(label, style));
+                        col_lines.push(ratatui::text::Line::styled(padded_label, style));
                     }
                 }
                 f.render_widget(Paragraph::new(col_lines).alignment(Alignment::Left), grid_chunks[c]);
