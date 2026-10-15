@@ -209,7 +209,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
     loop {
         let draw_res = terminal.draw(|f| {
             let size = f.area();
-            let popup_w = if num_cols == 2 { 64 } else { 42 }.min(size.width.saturating_sub(4));
+            let popup_w = if num_cols == 2 { 52 } else { 32 }.min(size.width.saturating_sub(4));
             let popup_h = (num_rows as u16 + 4).min(size.height.saturating_sub(4)).max(6);
 
             let percent_x = ((popup_w as f32 / size.width as f32) * 100.0).clamp(35.0, 95.0) as u16;
@@ -256,7 +256,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         let p = &peers[idx];
                         let is_selected = idx == selected_idx;
                         let prefix = if is_selected { "> " } else { "  " };
-                        let label = format!("{}{:>width$}. {} ({})", prefix, idx + 1, p.hostname, p.os, width = pad_width);
+                        let label = format!("{}{:>width$}. {}", prefix, idx + 1, p.hostname, width = pad_width);
 
                         let style = if is_selected {
                             Style::default()
