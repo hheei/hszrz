@@ -294,26 +294,26 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                     chosen_peer = Some(peers[selected_idx].clone());
                     break;
                 }
-                KeyCode::Up => {
+                KeyCode::Up | KeyCode::Char('k') => {
                     if selected_idx > 0 {
                         selected_idx -= 1;
                     } else {
                         selected_idx = num_items - 1;
                     }
                 }
-                KeyCode::Down => {
+                KeyCode::Down | KeyCode::Char('j') => {
                     if selected_idx + 1 < num_items {
                         selected_idx += 1;
                     } else {
                         selected_idx = 0;
                     }
                 }
-                KeyCode::Left => {
+                KeyCode::Left | KeyCode::Char('h') => {
                     if num_cols == 2 && selected_idx >= num_rows {
                         selected_idx -= num_rows;
                     }
                 }
-                KeyCode::Right => {
+                KeyCode::Right | KeyCode::Char('l') => {
                     if num_cols == 2 && selected_idx + num_rows < num_items {
                         selected_idx += num_rows;
                     }
@@ -332,12 +332,6 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                         selected_idx += 1;
                         let order: Vec<String> = peers.iter().map(|p| p.hostname.clone()).collect();
                         save_config_order(&order);
-                    }
-                }
-                KeyCode::Char(c) if c.is_digit(10) => {
-                    let digit = c.to_digit(10).unwrap_or(0) as usize;
-                    if digit > 0 && digit <= num_items {
-                        selected_idx = digit - 1;
                     }
                 }
                 _ => {}
