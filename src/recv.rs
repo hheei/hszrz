@@ -135,7 +135,8 @@ pub fn run(args: &[String]) {
             p
         ));
     }
-    rsync.arg(format!("{}:{}", ssh_host, file_path));
+    let rsync_src = file_path.strip_prefix("~/").unwrap_or(&file_path);
+    rsync.arg(format!("{}:{}", ssh_host, rsync_src));
     rsync.arg(&final_dest);
 
     let success = match rsync.status() {

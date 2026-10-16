@@ -205,7 +205,8 @@ pub fn run(args: &[String]) {
     for (src, _) in &transfer_files {
         rsync.arg(src);
     }
-    rsync.arg(format!("{}:{}", ssh_host, dest_dir));
+    let rsync_dest = dest_dir.strip_prefix("~/").unwrap_or(&dest_dir);
+    rsync.arg(format!("{}:{}", ssh_host, rsync_dest));
 
     let success = match rsync.status() {
         Ok(s) if s.success() => true,
