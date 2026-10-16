@@ -1,8 +1,8 @@
 [mgr]
 prepend_keymap = [
-  # Upload: Send selected file(s) or hovered file via hsz
-  { on = "<C-u>", run = 'shell "hsz %s" --block', desc = "Upload (hsz send)" },
+  # Download: Send selected file(s) or hovered file to local machine via hsz
+  { on = "<C-d>", run = 'shell "hsz %s" --block', desc = "Download (hsz send)" },
 
-  # Download: Receive file into current directory via hrz
-  { on = "<C-d>", run = 'shell "hrz" --block',    desc = "Download (hrz receive)" },
+  # Upload: Receive file from remote machine into current directory via hrz
+  { on = "<C-u>", run = 'shell "hrz" --block',    desc = "Upload (hrz receive)" },
 ]
