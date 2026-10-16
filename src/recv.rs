@@ -186,6 +186,7 @@ fn detect_remote_os(host: &str, port: Option<u16>) -> String {
 }
 
 fn ask_file_macos(host: &str, port: Option<u16>) -> Option<String> {
+    use std::io::Write;
     let script = r#"try
 tell application "System Events"
 activate
@@ -195,9 +196,26 @@ end tell
 on error number -128
 return "CANCELED"
 end try"#;
-    let output = ssh_cmd(host, port).args(["osascript", "-e", script]).output().ok()?;
+    let mut child = ssh_cmd(host, port)
+        .arg("osascript")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(script.as_bytes());
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if out.is_empty() || out == "CANCELED" { None } else { Some(out) }
+    if out.is_empty() || out == "CANCELED" {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 fn ask_file_windows(host: &str, port: Option<u16>) -> Option<String> {
