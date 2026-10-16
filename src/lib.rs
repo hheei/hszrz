@@ -424,12 +424,10 @@ pub fn get_available_peers() -> (Vec<Peer>, HashSet<String>) {
     (peers, removed_set)
 }
 
-fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
-    let w = width.min(r.width.saturating_sub(2));
+fn left_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
+    let w = width.min(r.width.saturating_sub(1));
     let h = height.min(r.height);
-    let x = r.x + (r.width.saturating_sub(w)) / 2;
-    let y = r.y + (r.height.saturating_sub(h)) / 2;
-    Rect { x, y, width: w, height: h }
+    Rect { x: r.x, y: r.y, width: w, height: h }
 }
 
 enum AppMode {
@@ -506,7 +504,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
             };
             // Exact height without any extra line padding / blank rows
             let popup_h = (visible_count as u16 + extra_lines).min(size.height);
-            let area = centered_rect_fixed(popup_w, popup_h, size);
+            let area = left_rect_fixed(popup_w, popup_h, size);
             f.render_widget(Clear, area);
 
             // Clean title with action label only (no file/count info in title)
@@ -798,7 +796,7 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
     let mut terminal = match Terminal::with_options(
         backend,
         TerminalOptions {
-            viewport: Viewport::Inline(6),
+            viewport: Viewport::Inline(5),
         },
     ) {
         Ok(t) => t,
@@ -808,29 +806,17 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
         },
     };
 
-    let (stem, ext) = split_stem_ext(filename);
-    let preview_rename = if ext.is_empty() {
-        format!("{}.1", stem)
-    } else {
-        format!("{}.1.{}", stem, ext)
-    };
-
-    let options = [
-        "1. Overwrite".to_string(),
-        format!("2. Rename (save as {})", preview_rename),
-    ];
-
+    let options = ["Overwrite", "Rename"];
     let mut selected_idx: usize = if default_rename { 1 } else { 0 };
 
     loop {
         let draw_res = terminal.draw(|f| {
             let size = f.area();
-            let popup_w = (54.max(filename.len() as u16 + 26)).min(size.width.saturating_sub(4));
-            let popup_h = 6.min(size.height); // exactly 1 info + 2 options + 1 footer + 2 borders
-            let area = centered_rect_fixed(popup_w, popup_h, size);
+            let popup_w = (42.max(filename.len() as u16 + 22)).min(size.width.saturating_sub(2));
+            let popup_h = 5.min(size.height); // exactly 1 info + 2 options + 2 borders
+            let area = left_rect_fixed(popup_w, popup_h, size);
             f.render_widget(Clear, area);
 
-            // Clean title: no file info in title
             let block = Block::default()
                 .title(" File Conflict ")
                 .title_alignment(Alignment::Left)
@@ -846,7 +832,6 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
                 .constraints([
                     Constraint::Length(1),
                     Constraint::Length(2),
-                    Constraint::Length(1),
                 ])
                 .split(inner);
 
@@ -861,25 +846,20 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
             let mut lines = Vec::new();
             for (idx, opt) in options.iter().enumerate() {
                 let is_sel = idx == selected_idx;
-                let prefix = if is_sel { "> " } else { "  " };
-                let style = if is_sel {
+                let prefix_span = if is_sel {
+                    Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::raw("  ")
+                };
+                let text_style = if is_sel {
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Reset)
                 };
-                lines.push(Line::styled(format!("{}{}", prefix, opt), style));
+                let text_span = Span::styled(*opt, text_style);
+                lines.push(Line::from(vec![prefix_span, text_span]));
             }
-            f.render_widget(Paragraph::new(lines), chunks[1]);
-
-            let footer_spans = vec![
-                Span::raw("  "),
-                Span::styled("jk", KEY_STYLE),
-                Span::styled(" select ", DIM_STYLE),
-                Span::styled("‧ ", DIM_STYLE),
-                Span::styled("enter", KEY_STYLE),
-                Span::styled(" confirm", DIM_STYLE),
-            ];
-            f.render_widget(Paragraph::new(Line::from(footer_spans)), chunks[2]);
+            f.render_widget(Paragraph::new(lines).alignment(Alignment::Left), chunks[1]);
         });
 
         if draw_res.is_err() {
