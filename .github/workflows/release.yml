@@ -59,6 +59,8 @@ jobs:
         run: |
           ARCHIVE="hszrz-${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
+          ln -sf hszrz hsz
+          ln -sf hszrz hrz
           tar -czf "../../../$ARCHIVE" hszrz hsz hrz
           cd ../../..
           echo "ARCHIVE=$ARCHIVE" >> $GITHUB_ENV
@@ -68,6 +70,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           $ARCHIVE = "hszrz-${{ matrix.target }}.zip"
+          Copy-Item target\${{ matrix.target }}\release\hszrz.exe target\${{ matrix.target }}\release\hsz.exe
+          Copy-Item target\${{ matrix.target }}\release\hszrz.exe target\${{ matrix.target }}\release\hrz.exe
           Compress-Archive -Path target\${{ matrix.target }}\release\hszrz.exe, target\${{ matrix.target }}\release\hsz.exe, target\${{ matrix.target }}\release\hrz.exe -DestinationPath $ARCHIVE
           echo "ARCHIVE=$ARCHIVE" >> $env:GITHUB_ENV
 

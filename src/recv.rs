@@ -1,10 +1,33 @@
-use hszrz::{pick_host_interactive, resolve_target, ssh_cmd, Peer};
+use hszrz::{
+    get_next_available_name, pick_host_interactive, prompt_conflict_resolution, resolve_target,
+    ssh_cmd, ConflictMode, Peer,
+};
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
+
+fn query_remote_size(host: &str, port: Option<u16>, remote_path: &str) -> u64 {
+    let script = format!(
+        r#"stat -c%s "{}" 2>/dev/null || stat -f%z "{}" 2>/dev/null || wc -c < "{}" 2>/dev/null"#,
+        remote_path, remote_path, remote_path
+    );
+    ssh_cmd(host, port)
+        .arg(script)
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0)
+}
 
 pub fn run(args: &[String]) {
     let mut target_host: Option<String> = None;
+    let mut dest_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -15,8 +38,14 @@ pub fn run(args: &[String]) {
                     i += 1;
                 }
             }
+            "-d" | "--dest" => {
+                if i + 1 < args.len() {
+                    dest_dir = Some(PathBuf::from(&args[i + 1]));
+                    i += 1;
+                }
+            }
             "-h" | "--help" => {
-                println!("hrz — Receive file from remote machine via native GUI picker\n\nUsage: hrz [options]\n\nOptions:\n  -t, --from <host>   Source host (skips selection menu)");
+                println!("hrz — Receive file from remote machine via native GUI picker\n\nUsage: hrz [options]\n\nOptions:\n  -t, --from <host>   Source host (skips selection menu)\n  -d, --dest <dir>    Destination directory (default: current directory)");
                 return;
             }
             _ => {}
@@ -32,8 +61,9 @@ pub fn run(args: &[String]) {
             dns: String::new(),
             reverse_port: None,
             is_custom: false,
+            source: hszrz::HostSource::User,
         },
-        None => match pick_host_interactive("Select Source Machine To Upload From") {
+        None => match pick_host_interactive("Source") {
             Some(p) => p,
             None => exit(0),
         },
@@ -74,19 +104,39 @@ pub fn run(args: &[String]) {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "downloaded_file".to_string());
 
-    let dest = env::current_dir()
-        .map(|d| d.join(&base_name))
-        .unwrap_or_else(|_| Path::new(&base_name).to_path_buf());
+    let target_folder = dest_dir
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    println!("Downloading '{}' from {} -> {}", base_name, peer.hostname, dest.display());
+    let initial_dest = target_folder.join(&base_name);
+    let remote_size = query_remote_size(&ssh_host, target_port, &file_path);
+    let is_dir_zstd = base_name.ends_with(".tar.zst");
+
+    let final_dest = if initial_dest.exists() {
+        let mode = prompt_conflict_resolution(&base_name, remote_size, is_dir_zstd);
+        match mode {
+            ConflictMode::Overwrite => initial_dest,
+            ConflictMode::Rename => {
+                let available_name = get_next_available_name(&base_name, |cand| target_folder.join(cand).exists());
+                target_folder.join(available_name)
+            }
+        }
+    } else {
+        initial_dest
+    };
+
+    let display_name = final_dest.file_name().unwrap_or_default().to_string_lossy();
+    println!("Downloading '{}' from {} -> {}", display_name, peer.hostname, final_dest.display());
 
     let mut rsync = Command::new("rsync");
-    rsync.arg("-ahP");
+    rsync.arg("-ahPs"); // -s / --protect-args to handle spaces safely
     if let Some(p) = target_port {
-        rsync.arg("-e").arg(format!("ssh -p {} -o StrictHostKeyChecking=no", p));
+        rsync.arg("-e").arg(format!(
+            "ssh -p {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR",
+            p
+        ));
     }
     rsync.arg(format!("{}:{}", ssh_host, file_path));
-    rsync.arg(&dest);
+    rsync.arg(&final_dest);
 
     let success = match rsync.status() {
         Ok(s) if s.success() => true,
@@ -94,16 +144,32 @@ pub fn run(args: &[String]) {
             let mut scp = Command::new("scp");
             scp.arg("-p");
             if let Some(p) = target_port {
-                scp.args(["-P", &p.to_string(), "-o", "StrictHostKeyChecking=no"]);
+                scp.args([
+                    "-P",
+                    &p.to_string(),
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "LogLevel=ERROR",
+                ]);
             }
             scp.arg(format!("{}:{}", ssh_host, file_path));
-            scp.arg(&dest);
+            scp.arg(&final_dest);
             scp.status().map(|s| s.success()).unwrap_or(false)
         }
     };
 
     if success {
-        println!("Received '{}'!", base_name);
+        // Always update Date Added / modification time to now
+        let _ = Command::new("touch").arg(&final_dest).status();
+        let now = std::time::SystemTime::now();
+        let _ = std::fs::File::open(&final_dest).and_then(|f| {
+            f.set_times(std::fs::FileTimes::new().set_accessed(now).set_modified(now))
+        });
+
+        println!("Received '{}'!", display_name);
     } else {
         eprintln!("Error: Download failed.");
         exit(1);
@@ -119,22 +185,29 @@ fn detect_remote_os(host: &str, port: Option<u16>) -> String {
 }
 
 fn ask_file_macos(host: &str, port: Option<u16>) -> Option<String> {
-    let script = "try\ntell application \"System Events\"\nactivate\nset f to choose file with prompt \"Select file to upload:\" default location (path to downloads folder)\nreturn POSIX path of f\nend tell\non error number -128\nreturn \"CANCELED\"\nend try";
-    let py = format!("import subprocess; print(subprocess.run(['osascript', '-e', '''{}'''], capture_output=True, text=True).stdout.strip())", script);
-    let output = ssh_cmd(host, port).args(["python3", "-c", &py]).output().ok()?;
+    let script = r#"try
+tell application "System Events"
+activate
+set f to choose file with prompt "Select file to upload:" default location (path to downloads folder)
+return POSIX path of f
+end tell
+on error number -128
+return "CANCELED"
+end try"#;
+    let output = ssh_cmd(host, port).args(["osascript", "-e", script]).output().ok()?;
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if out.is_empty() || out == "CANCELED" { None } else { Some(out) }
 }
 
 fn ask_file_windows(host: &str, port: Option<u16>) -> Option<String> {
-    let ps = "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to upload'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName } else { Write-Output 'CANCELED' }";
-    let output = ssh_cmd(host, port).args(["powershell", "-Command", ps]).output().ok()?;
+    let ps = r#"Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select file to upload'; if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $f.FileName } else { Write-Output 'CANCELED' }"#;
+    let output = ssh_cmd(host, port).args(["powershell", "-Sta", "-Command", ps]).output().ok()?;
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if out.is_empty() || out.contains("CANCELED") { None } else { Some(out) }
 }
 
 fn ask_file_linux(host: &str, port: Option<u16>) -> Option<String> {
-    let check = "if [ -n \"$DISPLAY\" ] || [ -n \"$WAYLAND_DISPLAY\" ]; then if command -v zenity >/dev/null; then zenity --file-selection 2>/dev/null; elif command -v kdialog >/dev/null; then kdialog --getopenfilename 2>/dev/null; else echo NO_PICKER; fi; else echo NO_DISPLAY; fi";
+    let check = r#"if [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; then if command -v zenity >/dev/null; then zenity --file-selection 2>/dev/null; elif command -v kdialog >/dev/null; then kdialog --getopenfilename 2>/dev/null; else echo NO_PICKER; fi; else echo NO_DISPLAY; fi"#;
     let output = ssh_cmd(host, port).arg(check).output().ok()?;
     let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if out == "NO_DISPLAY" {

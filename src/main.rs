@@ -5,7 +5,7 @@ mod recv;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let bin_name = env::args()
+    let raw_bin = env::args()
         .next()
         .map(|s| {
             std::path::Path::new(&s)
@@ -14,6 +14,10 @@ fn main() {
                 .unwrap_or(s)
         })
         .unwrap_or_else(|| "hszrz".to_string());
+
+    let bin_name = raw_bin
+        .strip_suffix(".exe")
+        .unwrap_or(&raw_bin);
 
     if bin_name == "hsz" {
         send::run(&args[1..]);
@@ -29,22 +33,27 @@ fn main() {
         return;
     }
 
-    let subcmd = args[1].clone();
-    let rest = args[2..].to_vec();
+    let subcmd = &args[1];
+    let rest = &args[2..];
 
     match subcmd.as_str() {
-        "send" | "s" | "sz" => send::run(&rest),
-        "recv" | "r" | "rz" => recv::run(&rest),
+        "send" | "s" | "sz" => send::run(rest),
+        "recv" | "r" | "rz" => recv::run(rest),
         "hosts" | "list" | "ls" => {
             let (peers, _) = hszrz::get_tailscale_peers();
-            println!("Online Tailscale Peers ({} total):", peers.len());
+            println!("Available Hosts ({} total, Tailscale + ~/.ssh/config):", peers.len());
             for p in peers {
-                println!("  - {:<16} ({})", p.hostname, p.os);
+                let src_desc = match p.source {
+                    hszrz::HostSource::User => "user",
+                    hszrz::HostSource::Ssh => "ssh",
+                    hszrz::HostSource::Tailscale => "tailscale",
+                };
+                println!("  - [{}] {:<18} ({}, {})", p.source.letter(), p.hostname, p.os, src_desc);
             }
         }
         "help" | "-h" | "--help" => print_help(),
         _ => {
-            if std::path::Path::new(&subcmd).exists() {
+            if subcmd.starts_with('-') || std::path::Path::new(subcmd).exists() {
                 send::run(&args[1..]);
             } else {
                 eprintln!("Unknown subcommand: '{}'", subcmd);

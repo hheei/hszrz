@@ -1,0 +1,11 @@
+# Yazi keymap configuration for hszrz
+# Add to ~/.config/yazi/keymap.toml
+
+[manager]
+prepend_keymap = [
+  # Upload: Send selected file(s) (or hovered file) to remote machine via hsz
+  { on = "<C-u>", run = 'shell "hsz \"$@\"" --block', desc = "Upload (hsz send)" },
+
+  # Download: Receive file from remote machine into current directory via hrz
+  { on = "<C-d>", run = 'shell "hrz" --block',        desc = "Download (hrz receive)" },
+]
