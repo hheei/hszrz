@@ -426,7 +426,7 @@ pub fn get_available_peers() -> (Vec<Peer>, HashSet<String>) {
 
 fn centered_rect_fixed(width: u16, height: u16, r: Rect) -> Rect {
     let w = width.min(r.width.saturating_sub(2));
-    let h = height.min(r.height.saturating_sub(2));
+    let h = height.min(r.height);
     let x = r.x + (r.width.saturating_sub(w)) / 2;
     let y = r.y + (r.height.saturating_sub(h)) / 2;
     Rect { x, y, width: w, height: h }
@@ -505,7 +505,7 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
                 AppMode::Normal => 4,  // 1 counter + 1 footer + 2 border
             };
             // Exact height without any extra line padding / blank rows
-            let popup_h = (visible_count as u16 + extra_lines).min(size.height.saturating_sub(2));
+            let popup_h = (visible_count as u16 + extra_lines).min(size.height);
             let area = centered_rect_fixed(popup_w, popup_h, size);
             f.render_widget(Clear, area);
 
@@ -826,7 +826,7 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
         let draw_res = terminal.draw(|f| {
             let size = f.area();
             let popup_w = (54.max(filename.len() as u16 + 26)).min(size.width.saturating_sub(4));
-            let popup_h = 6.min(size.height.saturating_sub(2)); // exactly 1 info + 2 options + 1 footer + 2 borders
+            let popup_h = 6.min(size.height); // exactly 1 info + 2 options + 1 footer + 2 borders
             let area = centered_rect_fixed(popup_w, popup_h, size);
             f.render_widget(Clear, area);
 
