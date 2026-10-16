@@ -439,7 +439,7 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = crossterm::execute!(stdout(), crossterm::cursor::Show);
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
     }
 }
 
@@ -720,6 +720,11 @@ pub fn pick_host_interactive(action_label: &str) -> Option<Peer> {
     }
 
     let _ = terminal.clear();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::MoveToColumn(0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+    );
 
     if is_dirty {
         save_config_hosts(&peers, &removed_set);
@@ -874,20 +879,22 @@ pub fn prompt_conflict_resolution(filename: &str, size_bytes: u64, default_renam
                 KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j') => {
                     selected_idx = if selected_idx == 0 { 1 } else { 0 };
                 }
-                KeyCode::Enter => {
-                    return if selected_idx == 0 {
-                        ConflictMode::Overwrite
-                    } else {
-                        ConflictMode::Rename
-                    };
-                }
+                KeyCode::Enter => break,
                 KeyCode::Esc | KeyCode::Char('q') => {
-                    return if default_rename { ConflictMode::Rename } else { ConflictMode::Overwrite };
+                    selected_idx = if default_rename { 1 } else { 0 };
+                    break;
                 }
                 _ => {}
             }
         }
     }
+
+    let _ = terminal.clear();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::MoveToColumn(0),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+    );
 
     if selected_idx == 0 {
         ConflictMode::Overwrite
